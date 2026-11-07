@@ -1,0 +1,373 @@
+
+name: Pascal Editor - Windows MCP Tunnel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pascal-mcp-windows
+  cancel-in-progress: true
+
+jobs:
+  pascal:
+    name: Start Pascal Editor and MCP
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.4"
+
+      - name: Validate configuration
+        shell: pwsh
+        env:
+          PASCAL_MCP_HTTP_TOKEN: ${{ secrets.PASCAL_MCP_HTTP_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PASCAL_MCP_HTTP_TOKEN)) {
+            throw "Missing repository secret: PASCAL_MCP_HTTP_TOKEN"
+          }
+
+          Write-Host "Node:"
+          node --version
+
+          Write-Host "NPM:"
+          npm --version
+
+          Write-Host "MCP authentication secret is configured."
+
+      - name: Prepare Pascal environment
+        shell: pwsh
+        run: |
+          $dataDir = Join-Path $env:RUNNER_TEMP "pascal-data"
+          New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+
+          "PASCAL_DATA_DIR=$dataDir" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Pascal data directory prepared."
+
+      - name: Start Pascal Editor
+        shell: pwsh
+        run: |
+          $editorLog = Join-Path $env:RUNNER_TEMP "pascal-editor.log"
+          $editorError = Join-Path $env:RUNNER_TEMP "pascal-editor-error.log"
+
+          $editor = Start-Process `
+            -FilePath "cmd.exe" `
+            -ArgumentList @(
+              "/c",
+              "npx --yes @pascal-app/cli editor --no-open --foreground"
+            ) `
+            -WorkingDirectory $env:GITHUB_WORKSPACE `
+            -RedirectStandardOutput $editorLog `
+            -RedirectStandardError $editorError `
+            -PassThru
+
+          Start-Sleep -Seconds 20
+
+          if ($editor.HasExited) {
+            Write-Host "Pascal Editor exited. Logs:"
+            if (Test-Path $editorLog) {
+              Get-Content $editorLog -Tail 80
+            }
+            if (Test-Path $editorError) {
+              Get-Content $editorError -Tail 80
+            }
+            throw "Pascal Editor failed to start."
+          }
+
+          "PASCAL_EDITOR_PID=$($editor.Id)" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "Pascal Editor process started."
+
+      - name: Start Pascal MCP HTTP server
+        shell: pwsh
+        env:
+          PASCAL_MCP_HTTP_TOKEN: ${{ secrets.PASCAL_MCP_HTTP_TOKEN }}
+        run: |
+          $mcpLog = Join-Path $env:RUNNER_TEMP "pascal-mcp.log"
+          $mcpError = Join-Path $env:RUNNER_TEMP "pascal-mcp-error.log"
+
+          $command = @'
+          npx --yes --package=@pascal-app/mcp pascal-mcp --http --host 0.0.0.0 --port 8787 --cors-origin https://chatgpt.com
+          '@.Trim()
+
+          $mcp = Start-Process `
+            -FilePath "cmd.exe" `
+            -ArgumentList @("/c", $command) `
+            -WorkingDirectory $env:GITHUB_WORKSPACE `
+            -RedirectStandardOutput $mcpLog `
+            -RedirectStandardError $mcpError `
+            -PassThru
+
+          "PASCAL_MCP_PID=$($mcp.Id)" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $ready = $false
+
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Seconds 2
+
+            try {
+              $headers = @{
+                Authorization = "Bearer $env:PASCAL_MCP_HTTP_TOKEN"
+                Accept = "application/json, text/event-stream"
+                "MCP-Protocol-Version" = "2025-03-26"
+              }
+
+              $body = @{
+                jsonrpc = "2.0"
+                id = 1
+                method = "initialize"
+                params = @{
+                  protocolVersion = "2025-03-26"
+                  capabilities = @{}
+                  clientInfo = @{
+                    name = "github-actions-test"
+                    version = "1.0.0"
+                  }
+                }
+              } | ConvertTo-Json -Depth 8 -Compress
+
+              $response = Invoke-WebRequest `
+                -Uri "http://127.0.0.1:8787/mcp" `
+                -Method POST `
+                -Headers $headers `
+                -ContentType "application/json" `
+                -Body $body `
+                -UseBasicParsing `
+                -TimeoutSec 10
+
+              if ($response.StatusCode -eq 200) {
+                $ready = $true
+                break
+              }
+            }
+            catch {
+              if ($i -eq 89) {
+                Write-Host "Local MCP diagnostic:"
+                if (Test-Path $mcpLog) {
+                  Get-Content $mcpLog -Tail 100
+                }
+                if (Test-Path $mcpError) {
+                  Get-Content $mcpError -Tail 100
+                }
+                throw "MCP initialize test failed: $($_.Exception.Message)"
+              }
+            }
+          }
+
+          if (-not $ready) {
+            throw "Pascal MCP did not become ready."
+          }
+
+          Write-Host "MCP initialize test passed."
+
+      - name: Download Cloudflare Tunnel
+        shell: pwsh
+        run: |
+          $cloudflared = Join-Path $env:RUNNER_TEMP "cloudflared.exe"
+
+          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -OutFile $cloudflared `
+            -UseBasicParsing
+
+          if (-not (Test-Path $cloudflared)) {
+            throw "Cloudflared download failed."
+          }
+
+          & $cloudflared --version
+
+          "CLOUDFLARED_PATH=$cloudflared" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Start Cloudflare Quick Tunnel
+        shell: pwsh
+        run: |
+          $cfLog = Join-Path $env:RUNNER_TEMP "cloudflare.log"
+          $cfError = Join-Path $env:RUNNER_TEMP "cloudflare-error.log"
+
+          $tunnel = Start-Process `
+            -FilePath $env:CLOUDFLARED_PATH `
+            -ArgumentList @(
+              "tunnel",
+              "--url",
+              "http://127.0.0.1:8787",
+              "--no-autoupdate"
+            ) `
+            -RedirectStandardOutput $cfLog `
+            -RedirectStandardError $cfError `
+            -PassThru
+
+          "CLOUDFLARE_PID=$($tunnel.Id)" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+          $publicUrl = $null
+
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep -Seconds 2
+
+            foreach ($file in @($cfLog, $cfError)) {
+              if (Test-Path $file) {
+                $content = Get-Content $file -Raw -ErrorAction SilentlyContinue
+
+                if ($content -match 'https://[a-zA-Z0-9-]+\.trycloudflare\.com') {
+                  $publicUrl = $Matches[0]
+                  break
+                }
+              }
+            }
+
+            if ($publicUrl) {
+              break
+            }
+          }
+
+          if (-not $publicUrl) {
+            if (Test-Path $cfLog) {
+              Get-Content $cfLog -Tail 100
+            }
+            if (Test-Path $cfError) {
+              Get-Content $cfError -Tail 100
+            }
+            throw "Cloudflare Quick Tunnel URL was not detected."
+          }
+
+          $mcpUrl = "$publicUrl/mcp"
+
+          "PASCAL_PUBLIC_URL=$publicUrl" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+          "PASCAL_MCP_URL=$mcpUrl" |
+            Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host ""
+          Write-Host "=========================================="
+          Write-Host "PASCAL MCP PUBLIC ENDPOINT"
+          Write-Host $mcpUrl
+          Write-Host "=========================================="
+          Write-Host "Bearer authentication: ENABLED"
+          Write-Host "Token value is intentionally not printed."
+
+      - name: Verify public MCP endpoint
+        shell: pwsh
+        env:
+          PASCAL_MCP_HTTP_TOKEN: ${{ secrets.PASCAL_MCP_HTTP_TOKEN }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:PASCAL_MCP_HTTP_TOKEN"
+            Accept = "application/json, text/event-stream"
+            "MCP-Protocol-Version" = "2025-03-26"
+          }
+
+          $body = @{
+            jsonrpc = "2.0"
+            id = 2
+            method = "initialize"
+            params = @{
+              protocolVersion = "2025-03-26"
+              capabilities = @{}
+              clientInfo = @{
+                name = "public-endpoint-test"
+                version = "1.0.0"
+              }
+            }
+          } | ConvertTo-Json -Depth 8 -Compress
+
+          $verified = $false
+
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $response = Invoke-WebRequest `
+                -Uri $env:PASCAL_MCP_URL `
+                -Method POST `
+                -Headers $headers `
+                -ContentType "application/json" `
+                -Body $body `
+                -UseBasicParsing `
+                -TimeoutSec 20
+
+              if ($response.StatusCode -eq 200) {
+                $verified = $true
+                break
+              }
+            }
+            catch {
+              Write-Host "Waiting for public tunnel..."
+            }
+
+            Start-Sleep -Seconds 4
+          }
+
+          if (-not $verified) {
+            throw "Public MCP endpoint verification failed."
+          }
+
+          Write-Host "PUBLIC MCP INITIALIZE: SUCCESS"
+
+      - name: Publish connection details
+        shell: pwsh
+        run: |
+          $summary = @"
+          # Pascal MCP is running
+
+          **MCP endpoint**
+
+          $env:PASCAL_MCP_URL
+
+          **Editor URL**
+
+          $env:PASCAL_PUBLIC_URL
+
+          **Transport:** Streamable HTTP
+
+          **Authentication:** Bearer token
+
+          **Local MCP initialize:** Passed
+
+          **Public MCP initialize:** Passed
+
+          The bearer token is stored in the GitHub repository secret
+          `PASCAL_MCP_HTTP_TOKEN` and is never printed in the logs.
+          "@
+
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
+
+          Write-Host $env:PASCAL_MCP_URL
+
+      - name: Keep services alive
+        shell: pwsh
+        run: |
+          Write-Host "Pascal MCP and Cloudflare are running."
+
+          while ($true) {
+            Start-Sleep -Seconds 30
+
+            $processes = @(
+              $env:PASCAL_EDITOR_PID,
+              $env:PASCAL_MCP_PID,
+              $env:CLOUDFLARE_PID
+            )
+
+            foreach ($processId in $processes) {
+              $process = Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
+
+              if (-not $process) {
+                throw "A required Pascal or Cloudflare process has stopped."
+              }
+            }
+
+            Write-Host "Pascal MCP heartbeat: $(Get-Date -Format o)"
+          ^
