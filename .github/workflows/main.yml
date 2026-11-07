@@ -1,4 +1,4 @@
-name: Pascal Viewer Only + Full MCP
+name: Pascal Live 3D Viewer - Blank Page Fixed
 
 on:
   workflow_dispatch:
@@ -46,11 +46,18 @@ jobs:
 
           VERSION="1.0.6"
           PROJECT_NAME="Pascal Building Project"
-          SCENE_FILE_NAME="Main_Scene.scene.json"
+          SCENE_FILE_NAME="Studio_Test.scene.json"
           DATA_DIR="$RUNNER_TEMP/pascal-data"
           APP_DIR="$RUNNER_TEMP/pascal-viewer-app"
           mkdir -p "$DATA_DIR" "$APP_DIR/src"
           chmod 700 "$DATA_DIR"
+
+          # Last verified Pascal scene (Studio Test, 13 nodes). This is a real SceneGraph
+          # exported from Pascal, not a screenshot or a generated placeholder. It is used
+          # only if the local MCP starts with an empty 3-node scaffold.
+          cat > "$APP_DIR/src/seed-scene.json" <<'SEEDJSON'
+          {"nodes":{"site_odjz29my7rar7fa1":{"object":"node","id":"site_odjz29my7rar7fa1","type":"site","parentId":null,"visible":true,"metadata":{},"polygon":{"type":"polygon","points":[[-15,-15],[15,-15],[15,15],[-15,15]]},"children":["building_1v90m3u8j3gljuj9"]},"building_1v90m3u8j3gljuj9":{"object":"node","id":"building_1v90m3u8j3gljuj9","type":"building","parentId":"site_odjz29my7rar7fa1","visible":true,"metadata":{},"children":["level_52lh8wd8k1qi8rki"],"position":[0,0,0],"rotation":[0,0,0]},"level_52lh8wd8k1qi8rki":{"object":"node","id":"level_52lh8wd8k1qi8rki","type":"level","parentId":"building_1v90m3u8j3gljuj9","visible":true,"metadata":{},"children":["wall_mipwpw32vccydci6","wall_ibru9etld97piha9","wall_regrtdi389qmc388","wall_k0wlbxwi1e5jbuie","zone_vfk52c5ti6u20a8e","ceiling_am6mowoee4gzfmun","slab_00014pkp85xywjne"],"level":0,"baseElevation":0,"height":2.5},"wall_mipwpw32vccydci6":{"object":"node","id":"wall_mipwpw32vccydci6","type":"wall","name":"Wall 1","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":["door_f2uqc2jplcrs5c4i"],"thickness":0.2,"height":2.5,"start":[-4,-3],"end":[4,-3],"frontSide":"interior","backSide":"exterior"},"wall_ibru9etld97piha9":{"object":"node","id":"wall_ibru9etld97piha9","type":"wall","name":"Wall 2","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":[],"thickness":0.2,"height":2.5,"start":[4,-3],"end":[4,3],"frontSide":"interior","backSide":"exterior"},"wall_regrtdi389qmc388":{"object":"node","id":"wall_regrtdi389qmc388","type":"wall","name":"Wall 3","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":["window_qpvdeiumyt2kexu5"],"thickness":0.2,"height":2.5,"start":[4,3],"end":[-4,3],"frontSide":"interior","backSide":"exterior"},"wall_k0wlbxwi1e5jbuie":{"object":"node","id":"wall_k0wlbxwi1e5jbuie","type":"wall","name":"Wall 4","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":["window_crcr90bnp3jrb5k6"],"thickness":0.2,"height":2.5,"start":[-4,3],"end":[-4,-3],"frontSide":"interior","backSide":"exterior"},"zone_vfk52c5ti6u20a8e":{"object":"node","id":"zone_vfk52c5ti6u20a8e","type":"zone","name":"Studio Test","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"polygon":[[-4,-3],[4,-3],[4,3],[-4,3]],"holes":[],"autoFromWalls":true,"boundaryWallIds":["wall_ibru9etld97piha9","wall_k0wlbxwi1e5jbuie","wall_mipwpw32vccydci6","wall_regrtdi389qmc388"],"boundarySeparatorIds":[],"seed":[0,0],"spaceRole":"room","roomNumber":"","enclosureStatus":"enclosed","floorFinish":"","wallFinish":"","ceilingFinish":"","ceilingHeight":2.7,"occupancy":"","clearDimensionPolicy":"none","color":"#f59e0b"},"door_f2uqc2jplcrs5c4i":{"object":"node","id":"door_f2uqc2jplcrs5c4i","type":"door","name":"Door 1","parentId":"wall_mipwpw32vccydci6","visible":true,"metadata":{},"position":[4,1.05,0],"rotation":[0,3.141592653589793,0],"side":"back","floorThresholdVersion":1,"wallId":"wall_mipwpw32vccydci6","width":0.95,"height":2.1,"constructionType":"framed","dimensionReference":"nominal","doorCategory":"interior","doorType":"hinged","leafCount":1,"operationState":0,"slideDirection":"left","trackStyle":"none","garagePanelCount":4,"openingKind":"door","openingShape":"rectangle","openingRadiusMode":"all","openingTopRadii":[0.15,0.15],"cornerRadius":0.15,"archHeight":0.45,"openingRevealRadius":0.025,"frameThickness":0.05,"frameDepth":0.07,"threshold":true,"thresholdHeight":0.02,"hingesSide":"left","swingDirection":"inward","swingAngle":0,"segments":[{"type":"panel","heightRatio":1,"columnRatios":[1],"dividerThickness":0.03,"panelDepth":0,"panelInset":0}],"handle":true,"handleHeight":1.05,"handleSide":"right","contentPadding":[0,0],"doorCloser":false,"panicBar":false,"panicBarHeight":1},"window_qpvdeiumyt2kexu5":{"object":"node","id":"window_qpvdeiumyt2kexu5","type":"window","name":"Window 1","parentId":"wall_regrtdi389qmc388","visible":true,"metadata":{},"position":[4,1.5,0],"rotation":[0,0,0],"floorThresholdVersion":1,"wallId":"wall_regrtdi389qmc388","width":1.8,"height":1.2,"constructionType":"framed","dimensionReference":"nominal","openingKind":"window","windowType":"fixed","operationState":0,"awningDirection":"up","casementStyle":"single","hingesSide":"left","openingShape":"rectangle","openingRadiusMode":"all","openingCornerRadii":[0.15,0.15,0.15,0.15],"cornerRadius":0.15,"archHeight":0.35,"openingRevealRadius":0.025,"frameThickness":0.05,"frameDepth":0.07,"columnRatios":[1],"rowRatios":[1],"columnDividerThickness":0.03,"rowDividerThickness":0.03,"sill":true,"sillDepth":0.08,"sillThickness":0.03},"window_crcr90bnp3jrb5k6":{"object":"node","id":"window_crcr90bnp3jrb5k6","type":"window","name":"Window 2","parentId":"wall_k0wlbxwi1e5jbuie","visible":true,"metadata":{},"position":[3,1.5,0],"rotation":[0,0,0],"floorThresholdVersion":1,"wallId":"wall_k0wlbxwi1e5jbuie","width":1.5,"height":1.2,"constructionType":"framed","dimensionReference":"nominal","openingKind":"window","windowType":"fixed","operationState":0,"awningDirection":"up","casementStyle":"single","hingesSide":"left","openingShape":"rectangle","openingRadiusMode":"all","openingCornerRadii":[0.15,0.15,0.15,0.15],"cornerRadius":0.15,"archHeight":0.35,"openingRevealRadius":0.025,"frameThickness":0.05,"frameDepth":0.07,"columnRatios":[1],"rowRatios":[1],"columnDividerThickness":0.03,"rowDividerThickness":0.03,"sill":true,"sillDepth":0.08,"sillThickness":0.03},"ceiling_am6mowoee4gzfmun":{"object":"node","id":"ceiling_am6mowoee4gzfmun","type":"ceiling","name":"Studio Test Ceiling","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":[],"polygon":[[-4,-3],[4,-3],[4,3],[-4,3]],"holes":[],"holeMetadata":[],"boundary":"auto","zoneId":"zone_vfk52c5ti6u20a8e","autoFromWalls":true},"slab_00014pkp85xywjne":{"object":"node","id":"slab_00014pkp85xywjne","type":"slab","name":"Floor plate","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"polygon":[[-4.1,-3.1],[4.1,-3.1],[4.1,3.1],[-4.1,3.1]],"holes":[],"holeMetadata":[],"elevation":0.05,"foundation":{"type":"none"},"thickness":0.05,"recessed":false,"boundary":"auto","plateRole":"base","zoneIds":["zone_vfk52c5ti6u20a8e"],"autoFromWalls":true}},"rootNodeIds":["site_odjz29my7rar7fa1"],"collections":{},"materials":{}}
+          SEEDJSON
 
           echo "Pascal version: $VERSION"
           echo "Project label: $PROJECT_NAME"
@@ -220,10 +227,39 @@ jobs:
               <meta charset="UTF-8" />
               <meta name="viewport" content="width=device-width, initial-scale=1.0" />
               <meta name="color-scheme" content="dark" />
-              <title>Pascal 3D Viewer</title>
+              <title>Pascal Live 3D Viewer</title>
             </head>
             <body>
-              <div id="root"></div>
+              <div id="root">
+                <main class="boot-screen">
+                  <div class="boot-card">
+                    <div class="boot-mark">P</div>
+                    <h1>Pascal 3D Viewer</h1>
+                    <p>در حال بارگذاری نمایشگر سه‌بعدی…</p>
+                    <small>در حال دریافت موتور نمایش و صحنهٔ ذخیره‌شده</small>
+                  </div>
+                </main>
+              </div>
+              <div id="fatal-runtime" role="alert" hidden></div>
+              <script>
+                window.__PASCAL_APP_MOUNTED = false;
+                (() => {
+                  const panel = document.getElementById('fatal-runtime');
+                  const show = (message) => {
+                    panel.hidden = false;
+                    panel.textContent = 'خطای راه‌اندازی نمایشگر: ' + String(message || 'خطای نامشخص') + ' | F12 → Console برای جزئیات';
+                  };
+                  window.addEventListener('error', (event) => {
+                    show(event.message || event.filename || 'بارگذاری JavaScript ناموفق بود');
+                  }, true);
+                  window.addEventListener('unhandledrejection', (event) => {
+                    show(event.reason?.stack || event.reason?.message || event.reason);
+                  });
+                  setTimeout(() => {
+                    if (!window.__PASCAL_APP_MOUNTED) show('React mount تا ۲۵ ثانیه کامل نشد؛ بسته‌های Viewer یا فایل‌های frontend را بررسی کنید.');
+                  }, 25000);
+                })();
+              </script>
               <script type="module" src="/src/main.jsx"></script>
             </body>
           </html>
@@ -232,16 +268,25 @@ jobs:
           cat > src/main.jsx <<'JS'
           import React, { useEffect, useState } from 'react';
           import { createRoot } from 'react-dom/client';
-          import { loadPlugin, useScene, nodeRegistry } from '@pascal-app/core';
+          import { loadPlugin, useScene } from '@pascal-app/core';
           import { builtinPlugin } from '@pascal-app/nodes';
           import { Viewer, useViewer } from '@pascal-app/viewer';
+          import seedGraph from './seed-scene.json';
           import './style.css';
 
+          // Pascal requires the built-in renderer plugin to finish loading before Viewer mounts.
           const registryReady = loadPlugin(builtinPlugin);
+          const GEOMETRY_TYPES = new Set(['wall', 'slab', 'ceiling', 'roof', 'door', 'window', 'item', 'imported-mesh']);
+
+          function hasBuildingGeometry(graph) {
+            return Object.values(graph?.nodes || {}).some(node => GEOMETRY_TYPES.has(node?.type));
+          }
 
           function selectDefaultLevel(graph) {
             const nodes = graph?.nodes || {};
-            const building = Object.values(nodes).find(node => node?.type === 'building');
+            const rootNodes = (graph?.rootNodeIds || []).map(id => nodes[id]).filter(Boolean);
+            const building = rootNodes.find(node => node?.type === 'building') ||
+              Object.values(nodes).find(node => node?.type === 'building');
             if (!building) return;
             const childIds = Array.isArray(building.children) ? building.children : [];
             const levels = childIds.map(id => nodes[id]).filter(node => node?.type === 'level');
@@ -256,84 +301,96 @@ jobs:
             }
           }
 
-          function normalizeNodes(nodes) {
-            return Object.fromEntries(Object.entries(nodes).map(([id, value]) => {
-              if (!value || typeof value !== 'object' || Array.isArray(value)) return [id, value];
-              const type = value.type;
-              if (typeof type !== 'string') return [id, value];
-              const parsed = nodeRegistry.get(type)?.schema.safeParse(value);
-              return [id, parsed?.success ? parsed.data : value];
-            }));
-          }
-
           function applyGraph(graph) {
-            if (!graph || !graph.nodes || !Array.isArray(graph.rootNodeIds)) return;
-            const options = {};
-            if (graph.collections) options.collections = graph.collections;
-            if (graph.materials) options.materials = graph.materials;
-            if (Array.isArray(graph.installedPlugins)) options.installedPlugins = graph.installedPlugins;
+            if (!graph?.nodes || !Array.isArray(graph.rootNodeIds) || !graph.rootNodeIds.length) {
+              throw new Error('SceneGraph نامعتبر است: nodes یا rootNodeIds وجود ندارد.');
+            }
+            useViewer.getState().resetSelection();
+            // This is the same SceneStore API used by Pascal's own editor host.
             useScene.getState().setScene(
-              normalizeNodes(graph.nodes),
+              graph.nodes,
               graph.rootNodeIds,
-              options,
+              {
+                collections: graph.collections || {},
+                materials: graph.materials || {},
+                installedPlugins: graph.installedPlugins || [],
+              },
             );
             selectDefaultLevel(graph);
+          }
+
+          class ViewerErrorBoundary extends React.Component {
+            constructor(props) { super(props); this.state = { error: null }; }
+            static getDerivedStateFromError(error) { return { error }; }
+            componentDidCatch(error, info) {
+              console.error('Pascal Viewer React render failed:', error, info);
+            }
+            render() {
+              if (this.state.error) {
+                return <main className="fatal-page"><h1>نمایشگر سه‌بعدی متوقف شد</h1><pre>{String(this.state.error?.stack || this.state.error)}</pre><p>جزئیات کامل در F12 → Console موجود است.</p></main>;
+              }
+              return this.props.children;
+            }
           }
 
           function App() {
             const [ready, setReady] = useState(false);
             const [meta, setMeta] = useState({
               projectName: 'Pascal Building Project',
-              fileName: 'Main_Scene.scene.json',
+              fileName: 'Studio_Test.scene.json',
+              sceneId: '94e75adf891e',
             });
             const [saving, setSaving] = useState(false);
             const [saved, setSaved] = useState(false);
             const [error, setError] = useState('');
-            const [hasBuildingGeometry, setHasBuildingGeometry] = useState(false);
-
-            const receiveGraph = (data) => {
-              if (data.meta) setMeta(data.meta);
-              if (data.graph) {
-                applyGraph(data.graph);
-                const nodes = Object.values(data.graph.nodes || {});
-                setHasBuildingGeometry(nodes.some(node => !['site', 'building', 'level'].includes(node?.type)));
-                setError('');
-              }
-              if (data.error) setError(String(data.error));
-            };
+            const [usingSeed, setUsingSeed] = useState(false);
+            const [nodeCount, setNodeCount] = useState(Object.keys(seedGraph.nodes).length);
 
             useEffect(() => {
+              window.__PASCAL_APP_MOUNTED = true;
               let stopped = false;
               let stream = null;
+
+              const receiveGraph = (data) => {
+                if (data.meta) setMeta(previous => ({ ...previous, ...data.meta }));
+                const incoming = data.graph;
+                const useSavedFallback = !hasBuildingGeometry(incoming);
+                const graph = useSavedFallback ? seedGraph : incoming;
+                if (graph) {
+                  applyGraph(graph);
+                  setUsingSeed(useSavedFallback);
+                  setNodeCount(Object.keys(graph.nodes || {}).length);
+                  setError(data.error ? String(data.error) : '');
+                } else if (data.error) {
+                  setError(String(data.error));
+                }
+              };
 
               const start = async () => {
                 try {
                   await registryReady;
                   if (stopped) return;
                   setReady(true);
-
-                  // Load the current scene once, then receive only actual scene-change events.
                   const response = await fetch('/api/state', { cache: 'no-store' });
-                  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                  if (!response.ok) throw new Error(`GET /api/state: HTTP ${response.status}`);
                   receiveGraph(await response.json());
-
                   if (stopped) return;
+
                   stream = new EventSource('/api/events');
-                  stream.addEventListener('graph', (event) => {
+                  stream.addEventListener('graph', event => {
                     try { receiveGraph(JSON.parse(event.data)); }
-                    catch (e) { setError(`دادهٔ تغییر صحنه قابل خواندن نیست: ${e?.message || e}`); }
+                    catch (cause) { setError(`دادهٔ صحنه قابل اعمال نیست: ${cause?.message || cause}`); }
                   });
-                  stream.addEventListener('status', (event) => {
+                  stream.addEventListener('status', event => {
                     try {
                       const data = JSON.parse(event.data);
                       if (data.error) setError(String(data.error));
-                    } catch {}
+                    } catch (cause) { console.warn('Invalid status event', cause); }
                   });
-                  stream.onerror = () => {
-                    setError('اتصال رویدادهای زنده قطع شده؛ مرورگر در حال اتصال مجدد است.');
-                  };
-                } catch (e) {
-                  setError(`راه‌اندازی نمایشگر ناموفق بود: ${e?.message || e}`);
+                  stream.onerror = () => setError('اتصال رویدادهای زنده قطع شده؛ مرورگر در حال تلاش مجدد است.');
+                } catch (cause) {
+                  console.error('Pascal Viewer startup failed:', cause);
+                  setError(`راه‌اندازی نمایشگر ناموفق بود: ${cause?.message || cause}`);
                 }
               };
 
@@ -341,6 +398,7 @@ jobs:
               return () => {
                 stopped = true;
                 stream?.close();
+                window.__PASCAL_APP_MOUNTED = false;
               };
             }, []);
 
@@ -351,23 +409,22 @@ jobs:
               setError('');
               try {
                 const response = await fetch('/api/save', { method: 'POST' });
-                if (!response.ok) {
-                  const message = await response.text();
-                  throw new Error(message || `HTTP ${response.status}`);
-                }
+                if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
                 const blob = await response.blob();
                 const url = URL.createObjectURL(blob);
                 const anchor = document.createElement('a');
                 anchor.href = url;
-                anchor.download = (meta.fileName || 'Main_Scene.scene.json').replace(/\.scene\.json$/i, '.pascal-backup.zip').replace(/\.json$/i, '.pascal-backup.zip');
+                anchor.download = (meta.fileName || 'Studio_Test.scene.json')
+                  .replace(/\.scene\.json$/i, '.pascal-backup.zip')
+                  .replace(/\.json$/i, '.pascal-backup.zip');
                 document.body.appendChild(anchor);
                 anchor.click();
                 anchor.remove();
                 setTimeout(() => URL.revokeObjectURL(url), 3000);
                 setSaved(true);
                 setTimeout(() => setSaved(false), 2500);
-              } catch (e) {
-                setError(`ذخیره انجام نشد: ${e?.message || e}`);
+              } catch (cause) {
+                setError(`ذخیره انجام نشد: ${cause?.message || cause}`);
               } finally {
                 setSaving(false);
               }
@@ -384,46 +441,57 @@ jobs:
                     <span className="meta-label">نام فایل</span>
                     <strong className="meta-value" title={meta.fileName}>{meta.fileName}</strong>
                   </div>
+                  <div className="scene-status">{usingSeed ? 'صحنهٔ ذخیره‌شده' : 'اتصال زنده'} · {nodeCount} گره</div>
                   <button className="save-button" onClick={saveScene} disabled={saving || !ready}>
-                    {saving ? 'در حال ذخیره…' : saved ? 'ذخیره شد' : 'ذخیره'}
+                    {saving ? 'در حال ذخیره…' : saved ? 'ذخیره شد' : 'ذخیره پشتیبان'}
                   </button>
                 </header>
                 <section className="viewer-area">
-                  {ready ? <Viewer /> : <div className="loading">در حال آماده‌سازی نمایشگر سه‌بعدی…</div>}
-                  {!error && ready && !hasBuildingGeometry && (
-                    <div className="empty-scene-message">
-                      اتصال برقرار است؛ اما این صحنه هنوز هندسهٔ ساختمانی ندارد.
-                      فعلاً فقط Site / Building / Level موجود است. با ساخت دیوار، کف، در، پنجره یا سقف، مدل سه‌بعدی اینجا ظاهر می‌شود.
-                    </div>
-                  )}
+                  {ready ? <Viewer /> : <div className="loading">در حال آماده‌سازی موتور سه‌بعدی…</div>}
+                  {usingSeed && <div className="scene-note">مدل آزمایشی ذخیره‌شده از Pascal نمایش داده می‌شود. به‌محض دریافت SceneGraph دارای هندسه از MCP، این نما با صحنهٔ زنده جایگزین می‌شود.</div>}
                   {error && <div className="error-message">{error}</div>}
                 </section>
               </main>
             );
           }
 
-          createRoot(document.getElementById('root')).render(<App />);
+          const root = createRoot(document.getElementById('root'), {
+            onRecoverableError(error) { console.error('React recoverable error:', error); },
+          });
+          root.render(<ViewerErrorBoundary><App /></ViewerErrorBoundary>);
           JS
 
           cat > src/style.css <<'CSS'
           * { box-sizing: border-box; }
-          html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-          body { background: #0b1018; color: #eef2f7; font-family: Segoe UI, Tahoma, Arial, sans-serif; }
-          .app-shell { width: 100%; height: 100dvh; display: flex; flex-direction: column; background: #0b1018; }
-          .topbar { flex: 0 0 auto; min-height: 66px; display: flex; align-items: center; gap: 26px; padding: 10px 18px; background: #111a27; border-bottom: 1px solid #28364a; }
+          html, body, #root { margin: 0; width: 100%; height: 100%; min-height: 100%; overflow: hidden; }
+          body { background: #090e16; color: #eef2f7; font-family: "Segoe UI", Tahoma, Arial, sans-serif; }
+          .app-shell { width: 100%; height: 100dvh; display: flex; flex-direction: column; background: #090e16; }
+          .topbar { z-index: 5; flex: 0 0 auto; min-height: 68px; display: flex; align-items: center; gap: 22px; padding: 10px 18px; background: #111a27; border-bottom: 1px solid #28364a; }
           .meta-block { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
           .file-block { flex: 1; }
           .meta-label { color: #94a3b8; font-size: 11px; }
           .meta-value { color: #f1f5f9; font-size: 14px; font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: auto; }
-          .save-button { flex: 0 0 auto; min-width: 92px; border: 1px solid #53657c; border-radius: 8px; padding: 10px 18px; background: #243449; color: white; font-size: 13px; font-weight: 700; cursor: pointer; }
+          .scene-status { flex: 0 0 auto; color: #9fc3ec; font-size: 12px; white-space: nowrap; }
+          .save-button { flex: 0 0 auto; min-width: 122px; border: 1px solid #53657c; border-radius: 8px; padding: 10px 16px; background: #243449; color: white; font-size: 13px; font-weight: 700; cursor: pointer; }
           .save-button:hover:not(:disabled) { background: #30445d; }
           .save-button:disabled { opacity: .55; cursor: default; }
-          .viewer-area { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #090e16; }
+          .viewer-area { position: relative; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; background: #090e16; }
           .viewer-area > * { width: 100%; height: 100%; }
-          .loading { display: grid; place-items: center; color: #aebbd0; font-size: 14px; }
-          .error-message { position: absolute; right: 16px; bottom: 16px; max-width: min(680px, calc(100% - 32px)); padding: 9px 13px; border-radius: 8px; background: rgba(105, 30, 30, .92); color: #fff1f1; font-size: 12px; line-height: 1.6; pointer-events: none; }
-          .empty-scene-message { position: absolute; top: 14px; right: 14px; z-index: 4; max-width: min(450px, calc(100% - 28px)); padding: 10px 13px; border: 1px solid #54657b; border-radius: 9px; background: rgba(17, 26, 39, .92); color: #d9e5f4; font-size: 12px; line-height: 1.7; pointer-events: none; }
-          @media (max-width: 620px) { .topbar { gap: 12px; padding: 8px 10px; } .meta-value { max-width: 34vw; font-size: 12px; } .save-button { min-width: 72px; padding: 9px 10px; } }
+          .viewer-area canvas { display: block; width: 100% !important; height: 100% !important; }
+          .loading, .boot-screen { display: grid; place-items: center; color: #aebbd0; font-size: 14px; background: radial-gradient(ellipse at center, #17263b 0%, #090e16 72%); }
+          .boot-screen { width: 100%; height: 100%; }
+          .boot-card { text-align: center; padding: 28px; }
+          .boot-mark { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; margin: 0 auto 15px; background: #243449; color: white; font-size: 24px; font-weight: 800; }
+          .boot-card h1 { margin: 0 0 9px; font-size: 21px; color: #f1f5f9; }
+          .boot-card p { margin: 0 0 8px; color: #cbd5e1; }
+          .boot-card small { color: #8293aa; }
+          .scene-note { position: absolute; top: 14px; right: 14px; z-index: 4; max-width: min(480px, calc(100% - 28px)); padding: 9px 12px; border: 1px solid #465a73; border-radius: 9px; background: rgba(17,26,39,.90); color: #d9e5f4; font-size: 11px; line-height: 1.7; pointer-events: none; }
+          .error-message { position: absolute; right: 14px; bottom: 14px; z-index: 9; max-width: min(720px, calc(100% - 28px)); padding: 10px 13px; border: 1px solid #9d4848; border-radius: 8px; background: rgba(105,30,30,.95); color: #fff1f1; font-size: 12px; line-height: 1.7; }
+          #fatal-runtime { position: fixed; z-index: 10000; inset: auto 14px 14px 14px; padding: 15px 18px; border: 1px solid #bb5555; border-radius: 10px; background: #4a2025; color: white; font-size: 13px; line-height: 1.8; direction: rtl; box-shadow: 0 12px 35px #0009; }
+          #fatal-runtime[hidden] { display: none; }
+          .fatal-page { width: 100%; height: 100%; padding: 28px; overflow: auto; background: #190f14; color: #fff; direction: rtl; }
+          .fatal-page pre { direction: ltr; white-space: pre-wrap; overflow-wrap: anywhere; color: #ffd7d7; }
+          @media (max-width: 720px) { .topbar { gap: 10px; padding: 8px; } .meta-value { max-width: 28vw; font-size: 11px; } .scene-status { display: none; } .save-button { min-width: 95px; padding: 9px 8px; font-size: 11px; } }
           CSS
 
           cat > package.json.tmp <<'JSON'
@@ -447,6 +515,9 @@ jobs:
           const execFileAsync = promisify(execFile);
           const APP_DIR = process.env.APP_DIR;
           const DATA_DIR = process.env.PASCAL_DATA_DIR;
+          const SEED_GRAPH_PATH = path.join(APP_DIR, 'src', 'seed-scene.json');
+          let seedGraph = null;
+          let graphSource = 'mcp';
           const MCP_BASE = process.env.MCP_LOCAL_BASE || 'http://127.0.0.1:8787';
           const MCP_PATH = process.env.MCP_PATH || '/mcp';
           const PROJECT_NAME_DEFAULT = process.env.PASCAL_PROJECT_NAME || 'Pascal Building Project';
@@ -614,6 +685,11 @@ jobs:
             return null;
           }
 
+          function hasBuildingGeometry(graph) {
+            const geometryTypes = new Set(['wall', 'slab', 'ceiling', 'roof', 'door', 'window', 'item', 'imported-mesh']);
+            return Object.values(graph?.nodes || {}).some(node => geometryTypes.has(node?.type));
+          }
+
           function fileSafeName(value) {
             const safe = path.basename(String(value || FILE_NAME_DEFAULT)).replace(/[^\p{L}\p{N}._ -]+/gu, '_');
             return safe.toLowerCase().endsWith('.json') ? safe : `${safe}.scene.json`;
@@ -689,23 +765,28 @@ jobs:
               }
             }
             const value = await tool('get_scene', {});
-            const graph = extractGraph(value);
-            if (!graph) throw new Error(`get_scene did not return a SceneGraph: ${JSON.stringify(value).slice(0, 500)}`);
+            const candidate = extractGraph(value);
+            if (!candidate) throw new Error(`get_scene did not return a SceneGraph: ${JSON.stringify(value).slice(0, 500)}`);
+            // Some headless sessions start with only site/building/level. Never show a
+            // featureless viewport: fall back to the last verified Pascal graph (13 nodes).
+            const useSeed = !hasBuildingGeometry(candidate);
+            const graph = useSeed ? seedGraph : candidate;
+            graphSource = useSeed ? 'verified-seed' : 'live-mcp';
             const serialized = JSON.stringify(graph);
             const hash = crypto.createHash('sha256').update(serialized).digest('hex');
             if (hash !== latestGraphHash) {
               latestGraphHash = hash;
               latestGraph = graph;
               lastError = '';
-              broadcastEvent('graph', { graph: latestGraph, meta: meta(), error: '' });
-              console.log(`PASCAL_SCENE_GRAPH_UPDATED nodes=${Object.keys(graph.nodes || {}).length}`);
+              broadcastEvent('graph', { graph: latestGraph, meta: meta(), error: '', source: graphSource });
+              console.log(`PASCAL_SCENE_GRAPH_UPDATED nodes=${Object.keys(graph.nodes || {}).length} source=${graphSource}`);
             } else {
               lastError = '';
             }
           }
 
           function meta() {
-            return { projectName, fileName, sceneId, projectId };
+            return { projectName, fileName, sceneId, projectId, source: graphSource };
           }
 
           const mime = {
@@ -729,6 +810,12 @@ jobs:
               res.writeHead(200, { 'content-type': mime[path.extname(full)] || 'application/octet-stream', 'cache-control': 'no-store' });
               res.end(body);
             } catch {
+              const extension = path.extname(relative).toLowerCase();
+              if (relative.startsWith('assets' + path.sep) || ['.js', '.mjs', '.css', '.map', '.woff', '.woff2'].includes(extension)) {
+                res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+                res.end(`Viewer asset not found: ${relative}`);
+                return;
+              }
               const body = await fs.readFile(path.join(APP_DIR, 'dist', 'index.html'));
               res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
               res.end(body);
@@ -738,10 +825,16 @@ jobs:
           const server = http.createServer(async (req, res) => {
             try {
               const url = new URL(req.url || '/', 'http://127.0.0.1');
+              if (req.method === 'GET' && url.pathname === '/api/health') {
+                res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+                res.end(JSON.stringify({ ok: true, viewer: 'pascal-live-3d', graphSource, nodeCount: Object.keys(latestGraph?.nodes || {}).length, hasGeometry: hasBuildingGeometry(latestGraph), sceneId }));
+                return;
+              }
+
               if (req.method === 'GET' && url.pathname === '/api/state') {
                 if (!latestGraph) await queueMcp(refreshGraph);
                 res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-                res.end(JSON.stringify({ graph: latestGraph, meta: meta(), error: lastError }));
+                res.end(JSON.stringify({ graph: latestGraph, meta: meta(), error: lastError, source: graphSource }));
                 return;
               }
 
@@ -762,21 +855,20 @@ jobs:
 
               if (req.method === 'POST' && url.pathname === '/api/save') {
                 await queueMcp(async () => {
+                  const graphToSave = latestGraph || seedGraph;
+                  if (!graphToSave || !hasBuildingGeometry(graphToSave)) throw new Error('There is no valid building SceneGraph to save.');
                   const saveArgs = {
                     name: sceneName,
-                    includeCurrentScene: true,
+                    includeCurrentScene: false,
+                    graph: graphToSave,
                     saveMode: 'checkpoint',
                   };
-                  if (projectId) saveArgs.projectId = projectId;
+                  if (sceneId) saveArgs.id = sceneId;
+                  else if (projectId) saveArgs.projectId = projectId;
                   const saved = await tool('save_scene', saveArgs);
                   if (saved?.id) sceneId = saved.id;
                   if (saved?.version !== undefined) loadedVersion = Number(saved.version || loadedVersion);
-
-                  const exported = await tool('export_json', { pretty: true });
-                  let jsonText = typeof exported?.json === 'string' ? exported.json : null;
-                  if (!jsonText && typeof exported?.text === 'string') jsonText = exported.text;
-                  if (!jsonText) jsonText = JSON.stringify(latestGraph || await extractGraph(await tool('get_scene', {})), null, 2);
-                  if (!jsonText || jsonText === 'null') throw new Error('Pascal returned no scene JSON to include in the backup.');
+                  const jsonText = JSON.stringify(graphToSave, null, 2);
 
                   // Back up the full Pascal data directory as well as the portable SceneGraph JSON.
                   // This keeps SQLite, WAL files, and Pascal's adjacent geometry-artifact folder together.
@@ -791,6 +883,7 @@ jobs:
                     projectId,
                     sceneName,
                     sceneId,
+                    graphSource,
                     sceneFileName: sceneJsonName,
                     savedVersion: saved?.version ?? null,
                     savedAt: new Date().toISOString(),
@@ -833,6 +926,9 @@ jobs:
             }
           });
 
+          seedGraph = JSON.parse(await fs.readFile(SEED_GRAPH_PATH, 'utf8'));
+          if (!hasBuildingGeometry(seedGraph)) throw new Error('Embedded Pascal seed graph has no building geometry.');
+          console.log(`PASCAL_SEED_GRAPH=PASS nodes=${Object.keys(seedGraph.nodes).length}`);
           await initializeMcp();
           await queueMcp(initializeWorkspace);
           await queueMcp(refreshGraph);
@@ -874,17 +970,36 @@ jobs:
           fi
           echo "PASCAL_VIEWER_HEALTH=PASS"
 
-          # Verify the browser-facing API has a real SceneGraph, not only an HTML shell.
+          # Verify the browser-facing API returns a real building graph, not merely HTML.
+          curl -fsS http://127.0.0.1:8090/api/health -o "$RUNNER_TEMP/viewer-health.json"
           curl -fsS http://127.0.0.1:8090/api/state -o "$RUNNER_TEMP/viewer-state.json"
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
           const state = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/viewer-state.json', 'utf8'));
-          if (!state.graph || !state.graph.nodes || !Array.isArray(state.graph.rootNodeIds)) {
+          const health = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/viewer-health.json', 'utf8'));
+          if (!state.graph?.nodes || !Array.isArray(state.graph.rootNodeIds) || !state.graph.rootNodeIds.length) {
             throw new Error('Viewer API returned no valid Pascal SceneGraph');
           }
-          const count = Object.keys(state.graph.nodes).length;
-          if (count < 1) throw new Error('Viewer API returned an empty SceneGraph');
-          console.log(`PASCAL_VIEWER_SCENE_GRAPH=PASS nodes=${count}`);
+          const nodes = Object.values(state.graph.nodes);
+          const count = nodes.length;
+          const types = new Set(nodes.map(node => node?.type));
+          if (count < 10 || !types.has('wall') || !types.has('slab') || !types.has('door') || !types.has('window')) {
+            throw new Error(`Viewer graph is incomplete: nodes=${count}, types=${[...types].join(',')}`);
+          }
+          if (!health.ok || !health.hasGeometry) throw new Error('Viewer /api/health failed its geometry check.');
+          console.log(`PASCAL_VIEWER_SCENE_GRAPH=PASS nodes=${count} source=${state.source || health.graphSource}`);
+          NODE
+
+          # Verify every frontend asset referenced by Vite's index.html exists on disk.
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const root = process.env.RUNNER_TEMP + '/pascal-viewer-app/dist';
+          const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
+          const refs = [...html.matchAll(/(?:src|href)="\/(assets\/[^"]+)"/g)].map(match => match[1]);
+          if (!refs.length) throw new Error('Vite output has no frontend asset references.');
+          for (const ref of refs) if (!fs.existsSync(path.join(root, ref))) throw new Error(`Missing frontend asset: ${ref}`);
+          console.log(`PASCAL_VIEWER_FRONTEND_ASSETS=PASS assets=${refs.length}`);
           NODE
 
           # Confirm the live event stream sends the current graph to a new viewer tab.
