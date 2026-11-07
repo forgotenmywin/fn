@@ -764,7 +764,7 @@ jobs:
           echo "Waiting for read-only 3D viewer..."
           VIEWER_READY=0
           for _ in $(seq 1 90); do
-            CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/ || true)"
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/ 2>/dev/null || true)"
             if [[ "$CODE" == "200" ]]; then VIEWER_READY=1; break; fi
             if ! kill -0 "$(cat "$RUNNER_TEMP/pascal-viewer-server.pid")" 2>/dev/null; then
               echo "Viewer server exited unexpectedly:" >&2
@@ -799,7 +799,7 @@ jobs:
             echo "- **Display:** official Pascal Viewer package; read-only; live scene polling from MCP"
             echo "- **Controls shown:** project name, scene filename, Save"
             echo ""
-            echo "> The viewer does not open the Pascal Editor, request a public embed link, or expose scene-editing controls. The Save button creates a Pascal checkpoint and downloads a ZIP backup containing the SQLite data folder, adjacent geometry artifacts, a portable `.scene.json`, and a manifest."
+            echo "> The viewer does not open the Pascal Editor, request a public embed link, or expose scene-editing controls. The Save button creates a Pascal checkpoint and downloads a ZIP backup containing the SQLite data folder, adjacent geometry artifacts, a portable scene JSON file, and a manifest."
             echo ""
             echo "> Temporary test mode: no authentication is configured. Anyone who obtains the MCP Quick Tunnel URL may call write-capable tools. Stop this workflow when testing is finished."
           } >> "$GITHUB_STEP_SUMMARY"
