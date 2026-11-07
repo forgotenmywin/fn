@@ -1,4 +1,4 @@
-name: Pascal Live 3D Viewer - Blank Page Fixed
+name: Pascal Live 3D Viewer - React Global Bootstrap Fix
 
 on:
   workflow_dispatch:
@@ -266,6 +266,25 @@ jobs:
           HTML
 
           cat > src/main.jsx <<'JS'
+          // Bootstrap React before importing Pascal's viewer modules. Some Pascal
+          // package chunks still contain classic JSX output that reads the global React.
+          import React from 'react';
+          globalThis.React = React;
+          window.React = React;
+
+          try {
+            await import('./viewer-app.jsx');
+          } catch (error) {
+            console.error('Pascal Viewer module import failed:', error);
+            const panel = document.getElementById('fatal-runtime');
+            if (panel) {
+              panel.hidden = false;
+              panel.textContent = 'خطای بارگذاری ماژول نمایشگر: ' + (error?.stack || error?.message || String(error));
+            }
+          }
+          JS
+
+          cat > src/viewer-app.jsx <<'JS'
           import React, { useEffect, useState } from 'react';
           import { createRoot } from 'react-dom/client';
           import { loadPlugin, useScene } from '@pascal-app/core';
