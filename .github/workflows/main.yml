@@ -1,591 +1,436 @@
-
-name: Pascal Editor MCP - NO AUTH TEST
+name: Pascal Editor + Full MCP + Live Monitor
 
 on:
   workflow_dispatch:
+    inputs:
+      pascal_version:
+        description: "Pascal release tag (editor image and MCP package must match)"
+        required: false
+        default: "1.0.5"
+        type: string
 
 permissions:
   contents: read
+  packages: read
 
 concurrency:
-  group: pascal-no-auth-test
+  group: pascal-live-session
   cancel-in-progress: true
 
 jobs:
-  pascal:
-    name: Pascal Editor and Public MCP
-    runs-on: ubuntu-latest
+  pascal-live:
+    name: Pascal Editor, MCP and 3D Monitor
+    runs-on: ubuntu-24.04
     timeout-minutes: 360
 
     steps:
-
-      # ==========================================
-      # 1. Environment
-      # ==========================================
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22.23.4"
+          cache: "npm"
 
-      - name: Check environment
+      - name: Install Cloudflare Tunnel
         shell: bash
         run: |
           set -Eeuo pipefail
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
+            -o "$RUNNER_TEMP/cloudflared.deb"
+          sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
+          cloudflared --version
 
-          node --version
-          npm --version
-          docker version
-
-          echo "NO AUTHENTICATION MODE"
-          echo "No GitHub secrets required."
-
-      # ==========================================
-      # 2. Shared storage
-      # ==========================================
-
-      - name: Prepare Pascal storage
+      - name: Start Pascal, MCP, monitor and tunnels
+        id: stack
         shell: bash
+        env:
+          PASCAL_VERSION: ${{ inputs.pascal_version }}
         run: |
           set -Eeuo pipefail
 
-          DATA_DIR="${RUNNER_TEMP}/pascal-data"
-
+          VERSION="${PASCAL_VERSION:-1.0.5}"
+          DATA_DIR="$RUNNER_TEMP/pascal-data"
           mkdir -p "$DATA_DIR"
+          chmod 700 "$DATA_DIR"
 
-          echo "PASCAL_DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+          echo "Using Pascal version: $VERSION"
+          echo "Shared Pascal data directory: $DATA_DIR"
 
-          echo "Shared Pascal storage prepared."
+          # Start the editor tunnel first so the editor knows its public URL.
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3000 \
+            > "$RUNNER_TEMP/cloudflared-editor.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared-editor.pid"
 
-      # ==========================================
-      # 3. Install Cloudflare
-      # ==========================================
+          get_tunnel_url() {
+            local logfile="$1"
+            local url=""
+            for _ in $(seq 1 60); do
+              url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$logfile" 2>/dev/null | tail -n 1 || true)"
+              if [[ -n "$url" ]]; then
+                printf '%s' "$url"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "Cloudflare did not issue a Quick Tunnel URL. Log: $logfile" >&2
+            tail -n 80 "$logfile" >&2 || true
+            return 1
+          }
 
-      - name: Download Cloudflare
-        shell: bash
-        run: |
-          set -Eeuo pipefail
+          EDITOR_URL="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-editor.log")"
+          echo "EDITOR_URL=$EDITOR_URL" >> "$GITHUB_ENV"
+          echo "Editor tunnel: $EDITOR_URL"
 
-          CF_BIN="${RUNNER_TEMP}/cloudflared"
-
-          curl -fsSL \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
-            -o "$CF_BIN"
-
-          chmod +x "$CF_BIN"
-
-          "$CF_BIN" --version
-
-          echo "CLOUDFLARED_PATH=$CF_BIN" >> "$GITHUB_ENV"
-
-      # ==========================================
-      # 4. Start Editor tunnel
-      # ==========================================
-
-      - name: Start Editor tunnel
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          LOG="${RUNNER_TEMP}/editor-tunnel.log"
-
-          nohup "$CLOUDFLARED_PATH" tunnel \
-            --url http://127.0.0.1:3000 \
-            --no-autoupdate \
-            --protocol http2 \
-            --loglevel info \
-            > "$LOG" 2>&1 < /dev/null &
-
-          PID=$!
-
-          echo "EDITOR_TUNNEL_PID=$PID" >> "$GITHUB_ENV"
-
-          EDITOR_URL=""
-
-          for i in $(seq 1 90); do
-
-            EDITOR_URL=$(
-              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
-                "$LOG" | head -n 1 || true
-            )
-
-            if [[ -n "$EDITOR_URL" ]]; then
-              break
-            fi
-
-            kill -0 "$PID" 2>/dev/null || {
-              cat "$LOG"
-              exit 1
-            }
-
-            sleep 2
-          done
-
-          if [[ -z "$EDITOR_URL" ]]; then
-            cat "$LOG"
-            exit 1
-          fi
-
-          echo "PASCAL_EDITOR_URL=$EDITOR_URL" >> "$GITHUB_ENV"
-
-          echo "EDITOR URL: $EDITOR_URL"
-
-      # ==========================================
-      # 5. Start Editor without password
-      # ==========================================
-
-      - name: Start Pascal Editor
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          docker pull ghcr.io/pascalorg/pascal-editor:latest
-
-          docker rm -f pascal-editor 2>/dev/null || true
-
+          # The Editor and MCP process must use the very same SQLite directory.
+          # PASCAL_AUTH=proxy intentionally disables Pascal's password gate for this
+          # temporary test. The Cloudflare Quick Tunnel is NOT an authentication layer.
+          docker pull "ghcr.io/pascalorg/pascal-editor:${VERSION}"
           docker run -d \
             --name pascal-editor \
-            --publish 127.0.0.1:3000:3000 \
-            --env NODE_ENV=production \
-            --env PASCAL_DATA_DIR=/data \
-            --env PASCAL_AUTH=proxy \
-            --env "PASCAL_PUBLIC_URL=$PASCAL_EDITOR_URL" \
-            --volume "$PASCAL_DATA_DIR:/data" \
-            ghcr.io/pascalorg/pascal-editor:latest
+            --restart unless-stopped \
+            -p 127.0.0.1:3000:3000 \
+            -v "$DATA_DIR:/data" \
+            -e PASCAL_DATA_DIR=/data \
+            -e PASCAL_PUBLIC_URL="$EDITOR_URL" \
+            -e PASCAL_AUTH=proxy \
+            "ghcr.io/pascalorg/pascal-editor:${VERSION}"
 
-          READY=false
-
-          for i in $(seq 1 60); do
-
-            STATUS=$(
-              curl -sS \
-                --connect-timeout 3 \
-                --max-time 10 \
-                -o /tmp/pascal-health.txt \
-                -w "%{http_code}" \
-                http://127.0.0.1:3000/api/health \
-                2>/dev/null || true
-            )
-
-            echo "Editor health: HTTP $STATUS"
-
-            if [[ "$STATUS" == "200" ]]; then
-              READY=true
+          echo "Waiting for Pascal Editor health endpoint..."
+          EDITOR_READY=0
+          for _ in $(seq 1 90); do
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/health || true)"
+            if [[ "$CODE" == "200" ]]; then
+              EDITOR_READY=1
               break
             fi
-
-            if ! docker inspect pascal-editor \
-              --format '{{.State.Running}}' | grep -q true; then
-
-              docker logs --tail 120 pascal-editor || true
-              exit 1
-            fi
-
-            sleep 3
+            sleep 2
           done
-
-          if [[ "$READY" != "true" ]]; then
-            docker logs --tail 150 pascal-editor || true
+          if [[ "$EDITOR_READY" != "1" ]]; then
+            echo "Pascal Editor did not become healthy. Container logs:" >&2
+            docker logs --tail 150 pascal-editor >&2 || true
             exit 1
           fi
+          echo "PASCAL_EDITOR_HEALTH=PASS"
 
-          echo "PASCAL_EDITOR_STATUS=SUCCESS" >> "$GITHUB_ENV"
-
-          echo "PASCAL EDITOR READY"
-
-      # ==========================================
-      # 6. Start MCP WITHOUT authentication
-      # ==========================================
-
-      - name: Start Pascal MCP without token
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          LOG="${RUNNER_TEMP}/pascal-mcp.log"
-
-          echo "Starting MCP without Bearer authentication."
-
-          # Explicitly remove any inherited token.
-          # Host defaults to 127.0.0.1.
-          # This permits loopback HTTP without a token.
-
-          nohup env \
-            -u PASCAL_MCP_HTTP_TOKEN \
-            "PASCAL_DATA_DIR=$PASCAL_DATA_DIR" \
-            npm exec --yes --package=@pascal-app/mcp -- \
-              pascal-mcp \
-              --http \
-              --host 127.0.0.1 \
-              --port 8787 \
+          # Run the complete published Pascal MCP package for the same release.
+          # It binds only to loopback; Cloudflare forwards the public tunnel to it.
+          (
+            export PASCAL_DATA_DIR="$DATA_DIR"
+            exec npm exec --yes --package="@pascal-app/mcp@${VERSION}" -- \
+              pascal-mcp --http --host 127.0.0.1 --port 8787 \
               --cors-origin https://chatgpt.com \
               --cors-origin https://chat.openai.com \
-            > "$LOG" 2>&1 < /dev/null &
+              --cors-origin "$EDITOR_URL"
+          ) > "$RUNNER_TEMP/pascal-mcp.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/pascal-mcp.pid"
 
-          PID=$!
-
-          echo "PASCAL_MCP_PID=$PID" >> "$GITHUB_ENV"
-
-          READY=false
-
-          for i in $(seq 1 60); do
-
-            if ! kill -0 "$PID" 2>/dev/null; then
-              cat "$LOG"
-              exit 1
-            fi
-
-            STATUS=$(
-              curl -sS \
-                --connect-timeout 3 \
-                --max-time 10 \
-                -o /dev/null \
-                -w "%{http_code}" \
-                http://127.0.0.1:8787/mcp \
-                2>/dev/null || true
-            )
-
-            echo "Local MCP listener: HTTP $STATUS"
-
-            # GET /mcp without a session should return 405.
-            if [[ "$STATUS" == "405" ]]; then
-              READY=true
+          echo "Waiting for Pascal MCP listener..."
+          MCP_READY=0
+          for _ in $(seq 1 90); do
+            if ss -ltn | grep -qE '127\.0\.0\.1:8787|\[::1\]:8787'; then
+              MCP_READY=1
               break
             fi
-
             sleep 2
           done
-
-          if [[ "$READY" != "true" ]]; then
-            cat "$LOG"
+          if [[ "$MCP_READY" != "1" ]]; then
+            echo "Pascal MCP did not start. MCP log:" >&2
+            tail -n 150 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
             exit 1
           fi
+          echo "PASCAL_MCP_LISTENER=PASS"
 
-          echo "PASCAL_MCP_STATUS=READY" >> "$GITHUB_ENV"
+          # Expose MCP through a separate Quick Tunnel.
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787 \
+            > "$RUNNER_TEMP/cloudflared-mcp.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared-mcp.pid"
+          MCP_TUNNEL_BASE="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-mcp.log")"
 
-          echo "MCP LISTENER READY - NO TOKEN"
+          # Perform a real MCP initialize + tools/list handshake. Try both paths to
+          # avoid silently publishing a tunnel whose endpoint path is wrong.
+          export MCP_LOCAL_BASE="http://127.0.0.1:8787"
+          node --input-type=module <<'NODE' | tee "$RUNNER_TEMP/mcp-probe.txt"
+          const base = process.env.MCP_LOCAL_BASE;
+          const protocolVersion = '2025-06-18';
 
-      # ==========================================
-      # 7. Start public MCP tunnel
-      # ==========================================
+          function decode(raw) {
+            const data = raw.split(/\r?\n/).filter(line => line.startsWith('data:'))
+              .map(line => line.slice(5).trimStart()).join('\n');
+            if (data) return JSON.parse(data);
+            if (!raw.trim()) return null;
+            return JSON.parse(raw.trim());
+          }
 
-      - name: Start public MCP tunnel
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          LOG="${RUNNER_TEMP}/mcp-tunnel.log"
-
-          nohup "$CLOUDFLARED_PATH" tunnel \
-            --url http://127.0.0.1:8787 \
-            --http-host-header 127.0.0.1:8787 \
-            --no-autoupdate \
-            --protocol http2 \
-            --loglevel info \
-            > "$LOG" 2>&1 < /dev/null &
-
-          PID=$!
-
-          echo "MCP_TUNNEL_PID=$PID" >> "$GITHUB_ENV"
-
-          MCP_HOST=""
-
-          for i in $(seq 1 90); do
-
-            MCP_HOST=$(
-              grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
-                "$LOG" | head -n 1 || true
-            )
-
-            if [[ -n "$MCP_HOST" ]]; then
-              break
-            fi
-
-            kill -0 "$PID" 2>/dev/null || {
-              cat "$LOG"
-              exit 1
+          async function post(path, body, sessionId) {
+            const headers = {
+              'content-type': 'application/json',
+              'accept': 'application/json, text/event-stream',
+            };
+            if (sessionId) headers['mcp-session-id'] = sessionId;
+            if (body.method !== 'initialize') headers['mcp-protocol-version'] = protocolVersion;
+            const response = await fetch(`${base}${path}`, {
+              method: 'POST', headers, body: JSON.stringify(body),
+              signal: AbortSignal.timeout(20000),
+            });
+            const raw = await response.text();
+            let payload = null;
+            try { payload = decode(raw); } catch (error) {
+              throw new Error(`Cannot parse MCP response (${response.status}): ${raw.slice(0, 500)}`);
             }
+            return { response, payload, raw };
+          }
 
-            sleep 2
-          done
-
-          if [[ -z "$MCP_HOST" ]]; then
-            cat "$LOG"
-            exit 1
-          fi
-
-          MCP_URL="${MCP_HOST}/mcp"
-
-          echo "PASCAL_MCP_HOST=$MCP_HOST" >> "$GITHUB_ENV"
-          echo "PASCAL_MCP_URL=$MCP_URL" >> "$GITHUB_ENV"
-
-          echo "=========================================="
-          echo "PUBLIC EDITOR:"
-          echo "$PASCAL_EDITOR_URL"
-          echo ""
-          echo "PUBLIC MCP:"
-          echo "$MCP_URL"
-          echo "AUTHENTICATION: NONE"
-          echo "=========================================="
-
-      # ==========================================
-      # 8. MCP initialize and tools/list tests
-      # ==========================================
-
-      - name: Test MCP without authentication
-        shell: bash
-        run: |
-          set -uo pipefail
-
-          REQUEST="${RUNNER_TEMP}/mcp-request.json"
-          HEADERS="${RUNNER_TEMP}/mcp-headers.txt"
-          RESPONSE="${RUNNER_TEMP}/mcp-response.txt"
-          CURL_ERROR="${RUNNER_TEMP}/mcp-curl-error.txt"
-
-          cat > "$REQUEST" <<'JSON'
-          {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-              "protocolVersion": "2025-03-26",
-              "capabilities": {},
-              "clientInfo": {
-                "name": "chatgpt-no-auth-test",
-                "version": "1.0.0"
+          let connected = null;
+          let lastError = null;
+          for (const path of ['/mcp', '/mcp/']) {
+            try {
+              const init = await post(path, {
+                jsonrpc: '2.0', id: 1, method: 'initialize',
+                params: {
+                  protocolVersion,
+                  capabilities: {},
+                  clientInfo: { name: 'pascal-github-actions-probe', version: '1.0.0' },
+                },
+              });
+              if (init.response.status === 404 || init.response.status === 405) continue;
+              if (!init.response.ok || init.payload?.error) {
+                throw new Error(`initialize failed ${init.response.status}: ${JSON.stringify(init.payload)}`);
               }
+              const sessionId = init.response.headers.get('mcp-session-id') || undefined;
+              await post(path, { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId);
+              const listed = await post(path, {
+                jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
+              }, sessionId);
+              if (!listed.response.ok || listed.payload?.error) {
+                throw new Error(`tools/list failed ${listed.response.status}: ${JSON.stringify(listed.payload)}`);
+              }
+              const tools = listed.payload?.result?.tools;
+              if (!Array.isArray(tools) || tools.length === 0) {
+                throw new Error(`tools/list returned no tools: ${JSON.stringify(listed.payload).slice(0, 700)}`);
+              }
+              connected = { path, sessionId, tools };
+              break;
+            } catch (error) {
+              lastError = error;
             }
           }
-          JSON
 
-          mcp_test() {
-            ENDPOINT="$1"
-            LABEL="$2"
+          if (!connected) throw new Error(`MCP handshake failed: ${lastError?.message || 'endpoint not found'}`);
 
-            echo ""
-            echo "=========================================="
-            echo "TEST: $LABEL"
-            echo "$ENDPOINT"
-            echo "AUTHENTICATION: NONE"
-            echo "=========================================="
+          console.log(`MCP_PATH=${connected.path}`);
+          console.log(`MCP_TOOLS_COUNT=${connected.tools.length}`);
+          console.log(`MCP_TOOLS=${connected.tools.map(tool => tool.name).join(',')}`);
 
-            STATUS="000"
-
-            for i in $(seq 1 20); do
-
-              STATUS=$(
-                curl -sS \
-                  --connect-timeout 10 \
-                  --max-time 40 \
-                  -D "$HEADERS" \
-                  -o "$RESPONSE" \
-                  -w "%{http_code}" \
-                  -X POST "$ENDPOINT" \
-                  -H "Origin: https://chatgpt.com" \
-                  -H "Accept: application/json, text/event-stream" \
-                  -H "Content-Type: application/json" \
-                  --data-binary "@$REQUEST" \
-                  2>"$CURL_ERROR" || true
-              )
-
-              echo "$LABEL initialize attempt $i: HTTP $STATUS"
-
-              if [[ "$STATUS" == "200" ]]; then
-                break
-              fi
-
-              sleep 3
-            done
-
-            if [[ "$STATUS" != "200" ]]; then
-              echo "INITIALIZE FAILED"
-
-              echo "Headers:"
-              cat "$HEADERS" || true
-
-              echo "Response:"
-              cat "$RESPONSE" || true
-
-              echo "Curl error:"
-              cat "$CURL_ERROR" || true
-
-              return 1
-            fi
-
-            SESSION_ID=$(
-              awk 'tolower($1) == "mcp-session-id:" {
-                gsub("\r", "", $2);
-                print $2
-              }' "$HEADERS" | tail -n 1
-            )
-
-            if [[ -z "$SESSION_ID" ]]; then
-              echo "MCP session ID missing."
-              cat "$RESPONSE" || true
-              return 1
-            fi
-
-            echo "$LABEL INITIALIZE SUCCESS"
-            echo "Session received."
-
-            # Send initialization notification.
-
-            curl -sS \
-              --connect-timeout 10 \
-              --max-time 30 \
-              -o /dev/null \
-              -X POST "$ENDPOINT" \
-              -H "Origin: https://chatgpt.com" \
-              -H "Mcp-Session-Id: $SESSION_ID" \
-              -H "MCP-Protocol-Version: 2025-03-26" \
-              -H "Accept: application/json, text/event-stream" \
-              -H "Content-Type: application/json" \
-              --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-              || true
-
-            # Retrieve the real tool catalog.
-
-            TOOLS_STATUS=$(
-              curl -sS \
-                --connect-timeout 10 \
-                --max-time 40 \
-                -o "$RESPONSE" \
-                -w "%{http_code}" \
-                -X POST "$ENDPOINT" \
-                -H "Origin: https://chatgpt.com" \
-                -H "Mcp-Session-Id: $SESSION_ID" \
-                -H "MCP-Protocol-Version: 2025-03-26" \
-                -H "Accept: application/json, text/event-stream" \
-                -H "Content-Type: application/json" \
-                --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-                || true
-            )
-
-            echo "$LABEL tools/list: HTTP $TOOLS_STATUS"
-
-            if [[ "$TOOLS_STATUS" != "200" ]] || ! grep -q '"tools"' "$RESPONSE"; then
-              cat "$RESPONSE" || true
-              return 1
-            fi
-
-            echo ""
-            echo "$LABEL AVAILABLE TOOLS:"
-
-            grep -Eo '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-              "$RESPONSE" | head -n 80 || true
-
-            echo ""
-            echo "$LABEL MCP SUCCESS"
-
-            return 0
+          // A read-only call proves that the tool catalogue is usable, not merely listed.
+          const scene = await post(connected.path, {
+            jsonrpc: '2.0', id: 3, method: 'tools/call',
+            params: { name: 'get_scene', arguments: {} },
+          }, connected.sessionId);
+          if (!scene.response.ok || scene.payload?.error || scene.payload?.result?.isError) {
+            throw new Error(`get_scene probe failed: ${JSON.stringify(scene.payload).slice(0, 900)}`);
           }
+          console.log('MCP_GET_SCENE=PASS');
+          NODE
 
-          LOCAL_RESULT=0
-          PUBLIC_RESULT=0
+          MCP_PATH="$(sed -n 's/^MCP_PATH=//p' "$RUNNER_TEMP/mcp-probe.txt" | tail -n 1)"
+          MCP_TOOLS_COUNT="$(sed -n 's/^MCP_TOOLS_COUNT=//p' "$RUNNER_TEMP/mcp-probe.txt" | tail -n 1)"
+          if [[ -z "$MCP_PATH" || -z "$MCP_TOOLS_COUNT" ]]; then
+            echo "MCP probe did not report a usable tool catalogue." >&2
+            tail -n 150 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
+            exit 1
+          fi
+          MCP_URL="${MCP_TUNNEL_BASE}${MCP_PATH}"
+          echo "MCP_URL=$MCP_URL" >> "$GITHUB_ENV"
+          echo "MCP_TOOLS_COUNT=$MCP_TOOLS_COUNT" >> "$GITHUB_ENV"
+          echo "MCP endpoint: $MCP_URL"
+          echo "MCP tools discovered: $MCP_TOOLS_COUNT"
 
-          mcp_test \
-            "http://127.0.0.1:8787/mcp" \
-            "LOCAL" || LOCAL_RESULT=$?
+          # A small monitor page. The 3D canvas itself is Pascal's official public
+          # embed viewer, not a second renderer or a fake screenshot.
+          cat > "$RUNNER_TEMP/pascal-monitor.mjs" <<'MONITOR'
+          import http from 'node:http';
 
-          mcp_test \
-            "$PASCAL_MCP_URL" \
-            "PUBLIC" || PUBLIC_RESULT=$?
+          const editorUrl = process.env.EDITOR_PUBLIC_URL;
+          const mcpUrl = process.env.MCP_PUBLIC_URL;
+          const mcpLocalPath = process.env.MCP_LOCAL_PATH || '/mcp';
+          if (!editorUrl || !mcpUrl) throw new Error('Missing editor/MCP public URL');
 
-          if [[ "$LOCAL_RESULT" -eq 0 ]]; then
-            echo "PASCAL_LOCAL_VERIFY=SUCCESS" >> "$GITHUB_ENV"
-          else
-            echo "PASCAL_LOCAL_VERIFY=FAILED" >> "$GITHUB_ENV"
+          const html = `<!doctype html>
+          <html lang="fa" dir="rtl">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width,initial-scale=1">
+            <meta name="color-scheme" content="dark">
+            <title>Pascal Live Monitor</title>
+            <style>
+              *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#0b1018;color:#e8edf5;font-family:Segoe UI,Tahoma,Arial,sans-serif}
+              .app{height:100dvh;display:flex;flex-direction:column}.bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:#111a27;border-bottom:1px solid #273449}
+              .brand{font-weight:800;letter-spacing:.4px;margin-left:8px}.brand small{display:block;color:#94a3b8;font-size:11px;font-weight:400;letter-spacing:0}
+              .status{display:inline-flex;align-items:center;gap:6px;color:#aebbd0;font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:#64748b}.dot.ok{background:#22c55e}.dot.bad{background:#ef4444}
+              input{min-width:220px;flex:1;max-width:560px;background:#0b1220;border:1px solid #334155;color:#e8edf5;border-radius:8px;padding:9px 11px;direction:ltr;text-align:left}
+              button,.link{border:1px solid #3b4b63;background:#1a2738;color:#e8edf5;padding:9px 12px;border-radius:8px;cursor:pointer;text-decoration:none;font-size:13px;white-space:nowrap}
+              button:hover,.link:hover{background:#263850}.viewer{position:relative;flex:1;min-height:0;background:#090e16}.viewer iframe{width:100%;height:100%;border:0;background:#090e16}.empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;background:radial-gradient(ellipse at center,#172538,#090e16 72%);color:#cbd5e1;pointer-events:none}.empty .box{max-width:620px;line-height:1.9}.empty strong{color:white;font-size:19px}.footer{padding:7px 14px;color:#8795aa;font-size:11px;background:#111a27;border-top:1px solid #273449;display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap}
+              @media(max-width:700px){.brand{width:100%}input{max-width:none;min-width:100%}.bar{gap:8px}.link,button{flex:1;text-align:center}}
+            </style>
+          </head>
+          <body>
+            <main class="app">
+              <header class="bar">
+                <div class="brand">PASCAL LIVE MONITOR<small>نمای زندهٔ سه‌بعدی پروژه</small></div>
+                <span class="status"><i id="edDot" class="dot"></i><span id="edText">Editor…</span></span>
+                <span class="status"><i id="mcpDot" class="dot"></i><span id="mcpText">MCP…</span></span>
+                <input id="sceneRef" placeholder="لینک Public Embed یا شناسهٔ صحنه را اینجا بگذار" autocomplete="off">
+                <button id="loadBtn">نمایش صحنه</button>
+                <button id="refreshBtn">تازه‌سازی</button>
+                <button id="fullBtn">تمام‌صفحه</button>
+                <a class="link" href="${editorUrl}" target="_blank" rel="noopener">بازکردن Editor</a>
+              </header>
+              <section class="viewer" id="viewer">
+                <iframe id="sceneFrame" title="Pascal 3D scene monitor" allow="fullscreen" allowfullscreen></iframe>
+                <div class="empty" id="empty"><div class="box"><strong>هنوز صحنه‌ای انتخاب نشده</strong><br>در Pascal وارد پروژه شو، از منوی Share گزینهٔ Public Link را روشن کن و لینک یا شناسهٔ صحنه را اینجا وارد کن.<br>این پنجره از Viewer رسمی Pascal استفاده می‌کند؛ با ماوس بچرخان و با چرخ ماوس نزدیک/دور شو.</div></div>
+              </section>
+              <footer class="footer"><span>نمایشگر فقط‌خواندنی است؛ برای ویرایش از Editor استفاده کن.</span><span>تغییرات زنده به ذخیره‌شدن پروژه و همگام‌بودن Editor/MCP وابسته‌اند.</span></footer>
+            </main>
+            <script>
+              const EDITOR = ${JSON.stringify(editorUrl)};
+              const MCP = ${JSON.stringify(mcpUrl)};
+              const frame = document.getElementById('sceneFrame');
+              const input = document.getElementById('sceneRef');
+              const empty = document.getElementById('empty');
+              function embedUrl(raw){
+                raw = (raw || '').trim();
+                if (!raw) throw new Error('لینک یا شناسهٔ صحنه خالی است.');
+                const base = new URL(EDITOR);
+                if (/^https:\/\//i.test(raw)) {
+                  const u = new URL(raw);
+                  const match = u.pathname.match(/^\/embed\/([^/]+)/);
+                  if (!match) throw new Error('لینک باید از نوع /embed/ باشد.');
+                  if (u.hostname !== base.hostname) throw new Error('لینک باید متعلق به همین نشست Pascal باشد.');
+                  return u.href;
+                }
+                const match = raw.match(/\/embed\/([^/?#]+)/);
+                const id = match ? match[1] : raw;
+                if (!/^[A-Za-z0-9_-]{3,180}$/.test(id)) throw new Error('شناسهٔ صحنه معتبر نیست.');
+                return new URL('/embed/' + encodeURIComponent(id), base.origin).href;
+              }
+              function loadScene(){
+                try {
+                  const url = embedUrl(input.value);
+                  frame.src = url;
+                  empty.style.display = 'none';
+                  localStorage.setItem('pascal-monitor-scene', input.value.trim());
+                } catch (e) { alert(e.message); }
+              }
+              document.getElementById('loadBtn').addEventListener('click', loadScene);
+              input.addEventListener('keydown', e => { if (e.key === 'Enter') loadScene(); });
+              document.getElementById('refreshBtn').addEventListener('click', () => { if (frame.src) frame.src = frame.src; });
+              document.getElementById('fullBtn').addEventListener('click', async () => {
+                const target = document.getElementById('viewer');
+                try { if (document.fullscreenElement) await document.exitFullscreen(); else await target.requestFullscreen(); }
+                catch (e) { console.error(e); }
+              });
+              const saved = localStorage.getItem('pascal-monitor-scene');
+              if (saved) { input.value = saved; try { frame.src = embedUrl(saved); empty.style.display = 'none'; } catch {} }
+              async function status(){
+                try {
+                  const r = await fetch('/api/status', {cache:'no-store'});
+                  const s = await r.json();
+                  document.getElementById('edDot').className = 'dot ' + (s.editor ? 'ok' : 'bad');
+                  document.getElementById('edText').textContent = s.editor ? 'Editor متصل' : 'Editor قطع';
+                  document.getElementById('mcpDot').className = 'dot ' + (s.mcp ? 'ok' : 'bad');
+                  document.getElementById('mcpText').textContent = s.mcp ? 'MCP متصل' : 'MCP قطع';
+                } catch {
+                  document.getElementById('edDot').className = 'dot bad';
+                  document.getElementById('mcpDot').className = 'dot bad';
+                }
+              }
+              status(); setInterval(status, 5000);
+            </script>
+          </body>
+          </html>`;
+
+          const server = http.createServer(async (req, res) => {
+            if (req.url === '/api/status') {
+              const timeout = AbortSignal.timeout(3500);
+              let editor = false;
+              let mcp = false;
+              try { const r = await fetch('http://127.0.0.1:3000/api/health', { signal: timeout }); editor = r.status === 200; } catch {}
+              try {
+                const r = await fetch(`http://127.0.0.1:8787${mcpLocalPath}`, { method: 'GET', signal: timeout });
+                mcp = r.status !== 404 && r.status < 500;
+              } catch {}
+              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+              res.end(JSON.stringify({ editor, mcp, at: new Date().toISOString() }));
+              return;
+            }
+            if (req.url === '/' || req.url?.startsWith('/?')) {
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+              res.end(html);
+              return;
+            }
+            res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+            res.end('Not found');
+          });
+          server.listen(8090, '127.0.0.1', () => console.log('Pascal monitor listening on 127.0.0.1:8090'));
+          MONITOR
+
+          EDITOR_PUBLIC_URL="$EDITOR_URL" \
+          MCP_PUBLIC_URL="$MCP_URL" \
+          MCP_LOCAL_PATH="$MCP_PATH" \
+          nohup node "$RUNNER_TEMP/pascal-monitor.mjs" \
+            > "$RUNNER_TEMP/pascal-monitor.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/pascal-monitor.pid"
+
+          echo "Waiting for monitor page..."
+          MONITOR_READY=0
+          for _ in $(seq 1 30); do
+            CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/ || true)"
+            if [[ "$CODE" == "200" ]]; then MONITOR_READY=1; break; fi
+            sleep 1
+          done
+          if [[ "$MONITOR_READY" != "1" ]]; then
+            echo "Monitor failed to start:" >&2
+            cat "$RUNNER_TEMP/pascal-monitor.log" >&2 || true
+            exit 1
           fi
 
-          if [[ "$PUBLIC_RESULT" -eq 0 ]]; then
-            echo "PASCAL_PUBLIC_VERIFY=SUCCESS" >> "$GITHUB_ENV"
-          else
-            echo "PASCAL_PUBLIC_VERIFY=FAILED" >> "$GITHUB_ENV"
-          fi
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8090 \
+            > "$RUNNER_TEMP/cloudflared-monitor.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared-monitor.pid"
+          MONITOR_URL="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-monitor.log")"
 
-          echo ""
-          echo "=========================================="
-          echo "LOCAL RESULT: $LOCAL_RESULT"
-          echo "PUBLIC RESULT: $PUBLIC_RESULT"
-          echo "=========================================="
+          echo "MONITOR_URL=$MONITOR_URL" >> "$GITHUB_ENV"
+          echo "EDITOR_URL=$EDITOR_URL" >> "$GITHUB_OUTPUT"
+          echo "MCP_URL=$MCP_URL" >> "$GITHUB_OUTPUT"
+          echo "MONITOR_URL=$MONITOR_URL" >> "$GITHUB_OUTPUT"
+          echo "MCP_TOOLS_COUNT=$MCP_TOOLS_COUNT" >> "$GITHUB_OUTPUT"
 
-      # ==========================================
-      # 9. Publish links
-      # ==========================================
-
-      - name: Publish links
-        if: always()
-        shell: bash
-        run: |
           {
-            echo "# Pascal - No Authentication Test"
+            echo "## Pascal Live Session"
             echo ""
-            echo "## Editor"
+            echo "- **3D Monitor:** $MONITOR_URL"
+            echo "- **Pascal Editor:** $EDITOR_URL"
+            echo "- **MCP endpoint:** $MCP_URL"
+            echo "- **MCP tools discovered:** $MCP_TOOLS_COUNT"
+            echo "- **Shared SQLite data:** Editor and MCP use the same mounted directory."
             echo ""
-            echo "${PASCAL_EDITOR_URL:-NOT_CREATED}"
+            echo "> In Pascal, open the project, choose Share → Public Link, then paste its embed URL or scene ID into the Monitor. The embed is read-only; use the Editor link to edit."
             echo ""
-            echo "## MCP"
-            echo ""
-            echo "${PASCAL_MCP_URL:-NOT_CREATED}"
-            echo ""
-            echo "## Authentication"
-            echo ""
-            echo "NONE - no Bearer token or password"
-            echo ""
-            echo "## Verification"
-            echo ""
-            echo "- Editor: ${PASCAL_EDITOR_STATUS:-UNKNOWN}"
-            echo "- MCP: ${PASCAL_MCP_STATUS:-UNKNOWN}"
-            echo "- Local: ${PASCAL_LOCAL_VERIFY:-UNKNOWN}"
-            echo "- Public: ${PASCAL_PUBLIC_VERIFY:-UNKNOWN}"
+            echo "> Temporary test mode: password protection is disabled. Anyone who obtains the Quick Tunnel URLs may access the Editor and call write-capable MCP tools. Stop this workflow after testing."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "EDITOR: ${PASCAL_EDITOR_URL:-NOT_CREATED}"
-          echo "MCP: ${PASCAL_MCP_URL:-NOT_CREATED}"
-          echo "LOCAL: ${PASCAL_LOCAL_VERIFY:-UNKNOWN}"
-          echo "PUBLIC: ${PASCAL_PUBLIC_VERIFY:-UNKNOWN}"
+          echo "=================================================="
+          echo "PASCAL EDITOR : $EDITOR_URL"
+          echo "PASCAL MONITOR: $MONITOR_URL"
+          echo "PASCAL MCP    : $MCP_URL"
+          echo "MCP TOOLS     : $MCP_TOOLS_COUNT"
+          echo "=================================================="
+          echo ""
+          echo "The session remains online until this workflow is cancelled or times out."
 
-      # ==========================================
-      # 10. Keep services alive
-      # ==========================================
-
-      - name: Keep Pascal running
+      - name: Keep Pascal session alive
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          echo "Pascal is running without passwords."
-
           while true; do
-
-            echo ""
-            echo "Heartbeat: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-
-            if ! docker inspect pascal-editor \
-              --format '{{.State.Running}}' | grep -q true; then
-
-              docker logs --tail 100 pascal-editor || true
-              exit 1
-            fi
-
-            for PID in \
-              "$EDITOR_TUNNEL_PID" \
-              "$MCP_TUNNEL_PID" \
-              "$PASCAL_MCP_PID"; do
-
-              if ! kill -0 "$PID" 2>/dev/null; then
-                echo "Process stopped: $PID"
-                exit 1
-              fi
-
-            done
-
-            echo "Editor: RUNNING"
-            echo "MCP: RUNNING"
-            echo "Cloudflare: RUNNING"
-
-            sleep 30
+            sleep 60
           done
