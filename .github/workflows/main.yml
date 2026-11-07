@@ -38,7 +38,7 @@ jobs:
           cloudflared --version
           zip -v >/dev/null
 
-      - name: Start headless Pascal MCP, build viewer, and publish monitor
+      - name: Start headless Pascal MCP, build live 3D viewer, and publish endpoints
         id: stack
         shell: bash
         run: |
@@ -60,6 +60,7 @@ jobs:
           # MCP is headless. The official Viewer package below is the only UI exposed to the user.
           (
             export PASCAL_DATA_DIR="$DATA_DIR"
+            export PASCAL_DB_PATH="$DATA_DIR/pascal.db"
             exec npm exec --yes --package="@pascal-app/mcp@${VERSION}" -- \
               pascal-mcp --http --host 127.0.0.1 --port 8787 \
               --cors-origin https://chatgpt.com \
@@ -288,50 +289,58 @@ jobs:
             const [saving, setSaving] = useState(false);
             const [saved, setSaved] = useState(false);
             const [error, setError] = useState('');
+            const [hasBuildingGeometry, setHasBuildingGeometry] = useState(false);
+
+            const receiveGraph = (data) => {
+              if (data.meta) setMeta(data.meta);
+              if (data.graph) {
+                applyGraph(data.graph);
+                const nodes = Object.values(data.graph.nodes || {});
+                setHasBuildingGeometry(nodes.some(node => !['site', 'building', 'level'].includes(node?.type)));
+                setError('');
+              }
+              if (data.error) setError(String(data.error));
+            };
 
             useEffect(() => {
               let stopped = false;
-              let lastGraph = '';
-              let timer;
+              let stream = null;
 
               const start = async () => {
                 try {
                   await registryReady;
                   if (stopped) return;
                   setReady(true);
+
+                  // Load the current scene once, then receive only actual scene-change events.
+                  const response = await fetch('/api/state', { cache: 'no-store' });
+                  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                  receiveGraph(await response.json());
+
+                  if (stopped) return;
+                  stream = new EventSource('/api/events');
+                  stream.addEventListener('graph', (event) => {
+                    try { receiveGraph(JSON.parse(event.data)); }
+                    catch (e) { setError(`دادهٔ تغییر صحنه قابل خواندن نیست: ${e?.message || e}`); }
+                  });
+                  stream.addEventListener('status', (event) => {
+                    try {
+                      const data = JSON.parse(event.data);
+                      if (data.error) setError(String(data.error));
+                    } catch {}
+                  });
+                  stream.onerror = () => {
+                    setError('اتصال رویدادهای زنده قطع شده؛ مرورگر در حال اتصال مجدد است.');
+                  };
                 } catch (e) {
                   setError(`راه‌اندازی نمایشگر ناموفق بود: ${e?.message || e}`);
-                  return;
                 }
-
-                const poll = async () => {
-                  if (stopped) return;
-                  try {
-                    const response = await fetch('/api/state', { cache: 'no-store' });
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    const data = await response.json();
-                    if (data.meta) setMeta(data.meta);
-                    if (data.graph) {
-                      const signature = JSON.stringify(data.graph);
-                      if (signature !== lastGraph) {
-                        applyGraph(data.graph);
-                        lastGraph = signature;
-                        setError('');
-                      }
-                    }
-                  } catch (e) {
-                    setError(`ارتباط نمایش زنده قطع شده است: ${e?.message || e}`);
-                  } finally {
-                    if (!stopped) timer = setTimeout(poll, 1100);
-                  }
-                };
-                poll();
               };
 
               start();
               return () => {
                 stopped = true;
-                if (timer) clearTimeout(timer);
+                stream?.close();
               };
             }, []);
 
@@ -381,6 +390,12 @@ jobs:
                 </header>
                 <section className="viewer-area">
                   {ready ? <Viewer /> : <div className="loading">در حال آماده‌سازی نمایشگر سه‌بعدی…</div>}
+                  {!error && ready && !hasBuildingGeometry && (
+                    <div className="empty-scene-message">
+                      اتصال برقرار است؛ اما این صحنه هنوز هندسهٔ ساختمانی ندارد.
+                      فعلاً فقط Site / Building / Level موجود است. با ساخت دیوار، کف، در، پنجره یا سقف، مدل سه‌بعدی اینجا ظاهر می‌شود.
+                    </div>
+                  )}
                   {error && <div className="error-message">{error}</div>}
                 </section>
               </main>
@@ -407,6 +422,7 @@ jobs:
           .viewer-area > * { width: 100%; height: 100%; }
           .loading { display: grid; place-items: center; color: #aebbd0; font-size: 14px; }
           .error-message { position: absolute; right: 16px; bottom: 16px; max-width: min(680px, calc(100% - 32px)); padding: 9px 13px; border-radius: 8px; background: rgba(105, 30, 30, .92); color: #fff1f1; font-size: 12px; line-height: 1.6; pointer-events: none; }
+          .empty-scene-message { position: absolute; top: 14px; right: 14px; z-index: 4; max-width: min(450px, calc(100% - 28px)); padding: 10px 13px; border: 1px solid #54657b; border-radius: 9px; background: rgba(17, 26, 39, .92); color: #d9e5f4; font-size: 12px; line-height: 1.7; pointer-events: none; }
           @media (max-width: 620px) { .topbar { gap: 12px; padding: 8px 10px; } .meta-value { max-width: 34vw; font-size: 12px; } .save-button { min-width: 72px; padding: 9px 10px; } }
           CSS
 
@@ -421,7 +437,7 @@ jobs:
           cat > "$RUNNER_TEMP/pascal-viewer-server.mjs" <<'SERVER'
           import http from 'node:http';
           import fs from 'node:fs/promises';
-          import { createReadStream } from 'node:fs';
+          import { createReadStream, watch as watchFile } from 'node:fs';
           import path from 'node:path';
           import os from 'node:os';
           import crypto from 'node:crypto';
@@ -448,6 +464,16 @@ jobs:
           let latestGraph = null;
           let latestGraphHash = '';
           let lastError = '';
+          const eventClients = new Set();
+          const dbWatchers = new Map();
+          let dbRefreshTimer = null;
+          const sseHeartbeat = setInterval(() => {
+            for (const response of eventClients) {
+              try { response.write(': keepalive\n\n'); }
+              catch { eventClients.delete(response); }
+            }
+          }, 20000);
+          sseHeartbeat.unref();
 
           function parseMcpBody(raw) {
             const dataLines = raw.split(/\r?\n/).filter(line => line.startsWith('data:'));
@@ -524,6 +550,61 @@ jobs:
           async function tool(name, args = {}) {
             const result = await rpc('tools/call', { name, arguments: args });
             return unwrapToolResult(result);
+          }
+
+          function sendEvent(response, eventName, payload) {
+            response.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+          }
+
+          function broadcastEvent(eventName, payload) {
+            for (const response of eventClients) {
+              try { sendEvent(response, eventName, payload); }
+              catch { eventClients.delete(response); }
+            }
+          }
+
+          function scheduleDatabaseRefresh() {
+            if (dbRefreshTimer) clearTimeout(dbRefreshTimer);
+            dbRefreshTimer = setTimeout(() => {
+              dbRefreshTimer = null;
+              queueMcp(refreshGraph).catch(error => {
+                lastError = error?.message || String(error);
+                broadcastEvent('status', { error: lastError });
+              });
+            }, 220);
+          }
+
+          function watchDatabaseFile(filePath) {
+            const attach = () => {
+              let watcher;
+              try {
+                watcher = watchFile(filePath, { persistent: true }, (eventType) => {
+                  if (eventType === 'change') scheduleDatabaseRefresh();
+                  if (eventType === 'rename') {
+                    watcher?.close();
+                    dbWatchers.delete(filePath);
+                    setTimeout(attach, 250);
+                  }
+                });
+                watcher.on('error', () => {
+                  watcher?.close();
+                  dbWatchers.delete(filePath);
+                  setTimeout(attach, 1000);
+                });
+                dbWatchers.set(filePath, watcher);
+              } catch {
+                setTimeout(attach, 1000);
+              }
+            };
+            attach();
+          }
+
+          function startDatabaseWatchers() {
+            // Pascal writes scene changes to SQLite WAL. Watching both files catches
+            // normal WAL commits and database checkpoints without polling or screenshots.
+            watchDatabaseFile(path.join(DATA_DIR, 'pascal.db-wal'));
+            watchDatabaseFile(path.join(DATA_DIR, 'pascal.db'));
+            console.log('PASCAL_SCENE_CHANGE_WATCH=fs.watch (SQLite DB + WAL)');
           }
 
           function extractGraph(value) {
@@ -615,8 +696,12 @@ jobs:
             if (hash !== latestGraphHash) {
               latestGraphHash = hash;
               latestGraph = graph;
+              lastError = '';
+              broadcastEvent('graph', { graph: latestGraph, meta: meta(), error: '' });
+              console.log(`PASCAL_SCENE_GRAPH_UPDATED nodes=${Object.keys(graph.nodes || {}).length}`);
+            } else {
+              lastError = '';
             }
-            lastError = '';
           }
 
           function meta() {
@@ -657,6 +742,21 @@ jobs:
                 if (!latestGraph) await queueMcp(refreshGraph);
                 res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
                 res.end(JSON.stringify({ graph: latestGraph, meta: meta(), error: lastError }));
+                return;
+              }
+
+              if (req.method === 'GET' && url.pathname === '/api/events') {
+                res.writeHead(200, {
+                  'content-type': 'text/event-stream; charset=utf-8',
+                  'cache-control': 'no-cache, no-transform',
+                  'connection': 'keep-alive',
+                  'x-accel-buffering': 'no',
+                });
+                res.write(': connected\n\n');
+                eventClients.add(res);
+                if (latestGraph) sendEvent(res, 'graph', { graph: latestGraph, meta: meta(), error: lastError });
+                else sendEvent(res, 'status', { error: lastError || 'Waiting for Pascal scene graph' });
+                req.on('close', () => eventClients.delete(res));
                 return;
               }
 
@@ -733,22 +833,16 @@ jobs:
             }
           });
 
-          async function pollForever() {
-            try { await queueMcp(refreshGraph); }
-            catch (error) { lastError = error?.message || String(error); }
-            setTimeout(pollForever, 950).unref?.();
-          }
-
           await initializeMcp();
           await queueMcp(initializeWorkspace);
           await queueMcp(refreshGraph);
+          startDatabaseWatchers();
           server.listen(8090, '127.0.0.1', () => {
             console.log(`Pascal read-only viewer server listening on 127.0.0.1:8090`);
             console.log(`PROJECT_NAME=${projectName}`);
             console.log(`SCENE_FILE_NAME=${fileName}`);
             console.log(`SCENE_ID=${sceneId || 'not-yet-saved'}`);
           });
-          pollForever();
           SERVER
 
           APP_DIR="$APP_DIR" \
@@ -780,6 +874,28 @@ jobs:
           fi
           echo "PASCAL_VIEWER_HEALTH=PASS"
 
+          # Verify the browser-facing API has a real SceneGraph, not only an HTML shell.
+          curl -fsS http://127.0.0.1:8090/api/state -o "$RUNNER_TEMP/viewer-state.json"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const state = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/viewer-state.json', 'utf8'));
+          if (!state.graph || !state.graph.nodes || !Array.isArray(state.graph.rootNodeIds)) {
+            throw new Error('Viewer API returned no valid Pascal SceneGraph');
+          }
+          const count = Object.keys(state.graph.nodes).length;
+          if (count < 1) throw new Error('Viewer API returned an empty SceneGraph');
+          console.log(`PASCAL_VIEWER_SCENE_GRAPH=PASS nodes=${count}`);
+          NODE
+
+          # Confirm the live event stream sends the current graph to a new viewer tab.
+          EVENT_PROBE="$(timeout 3s curl -fsSN http://127.0.0.1:8090/api/events 2>/dev/null || true)"
+          if ! grep -q '^event: graph$' <<< "$EVENT_PROBE"; then
+            echo "Viewer SSE endpoint did not send the current SceneGraph." >&2
+            cat "$RUNNER_TEMP/pascal-viewer-server.log" >&2 || true
+            exit 1
+          fi
+          echo "PASCAL_VIEWER_SSE=PASS"
+
           nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8090 \
             > "$RUNNER_TEMP/cloudflared-viewer.log" 2>&1 < /dev/null &
           echo $! > "$RUNNER_TEMP/cloudflared-viewer.pid"
@@ -796,10 +912,10 @@ jobs:
             echo "- **Viewer page:** $VIEWER_URL"
             echo "- **MCP endpoint:** $MCP_URL"
             echo "- **MCP tools discovered:** $MCP_TOOLS_COUNT"
-            echo "- **Display:** official Pascal Viewer package; read-only; live scene polling from MCP"
+            echo "- **Display:** official Pascal Viewer package; read-only; event-driven live SceneGraph updates: SQLite/WAL filesystem events -> MCP refresh -> SSE; no screenshot loop"
             echo "- **Controls shown:** project name, scene filename, Save"
             echo ""
-            echo "> The viewer does not open the Pascal Editor, request a public embed link, or expose scene-editing controls. The Save button creates a Pascal checkpoint and downloads a ZIP backup containing the SQLite data folder, adjacent geometry artifacts, a portable scene JSON file, and a manifest."
+            echo "> The browser mounts Pascal’s official 3D Viewer and built-in node renderers. Scene updates are event-driven: SQLite/WAL changes trigger an MCP refresh, then Server-Sent Events update the rendered SceneGraph. There is no screenshot capture or per-second scene polling. The viewer does not open the Pascal Editor, request a public embed link, or expose scene-editing controls. The Save button creates a Pascal checkpoint and downloads a ZIP backup containing the SQLite data folder, adjacent geometry artifacts, a portable scene JSON file, and a manifest."
             echo ""
             echo "> Temporary test mode: no authentication is configured. Anyone who obtains the MCP Quick Tunnel URL may call write-capable tools. Stop this workflow when testing is finished."
           } >> "$GITHUB_STEP_SUMMARY"
