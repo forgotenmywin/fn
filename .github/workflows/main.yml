@@ -1,25 +1,19 @@
-name: Pascal Editor + Full MCP + Live Monitor
+name: Pascal Viewer Only + Full MCP
 
 on:
   workflow_dispatch:
-    inputs:
-      pascal_version:
-        description: "Pascal release tag (editor image and MCP package must match)"
-        required: false
-        default: "1.0.5"
-        type: string
 
 permissions:
   contents: read
   packages: read
 
 concurrency:
-  group: pascal-live-session
+  group: pascal-viewer-only-session
   cancel-in-progress: true
 
 jobs:
-  pascal-live:
-    name: Pascal Editor, MCP and 3D Monitor
+  pascal-viewer:
+    name: Pascal headless MCP and read-only 3D viewer
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -28,7 +22,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.23.4"
-          # No npm cache: this workflow uses npm exec and has no lockfile.
+          # npm cache is intentionally disabled: this generated workspace has no lockfile.
 
       - name: Install Cloudflare Tunnel
         shell: bash
@@ -37,89 +31,39 @@ jobs:
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
             -o "$RUNNER_TEMP/cloudflared.deb"
           sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
+          if ! command -v zip >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq zip
+          fi
           cloudflared --version
+          zip -v >/dev/null
 
-      - name: Start Pascal, MCP, monitor and tunnels
+      - name: Start headless Pascal MCP, build viewer, and publish monitor
         id: stack
         shell: bash
-        env:
-          PASCAL_VERSION: ${{ inputs.pascal_version }}
         run: |
           set -Eeuo pipefail
 
-          VERSION="${PASCAL_VERSION:-1.0.5}"
+          VERSION="1.0.6"
+          PROJECT_NAME="Pascal Building Project"
+          SCENE_FILE_NAME="Main_Scene.scene.json"
           DATA_DIR="$RUNNER_TEMP/pascal-data"
-          mkdir -p "$DATA_DIR"
+          APP_DIR="$RUNNER_TEMP/pascal-viewer-app"
+          mkdir -p "$DATA_DIR" "$APP_DIR/src"
           chmod 700 "$DATA_DIR"
 
-          echo "Using Pascal version: $VERSION"
-          echo "Shared Pascal data directory: $DATA_DIR"
+          echo "Pascal version: $VERSION"
+          echo "Project label: $PROJECT_NAME"
+          echo "Scene filename: $SCENE_FILE_NAME"
+          echo "Shared scene database: $DATA_DIR"
 
-          # Start the editor tunnel first so the editor knows its public URL.
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3000 \
-            > "$RUNNER_TEMP/cloudflared-editor.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/cloudflared-editor.pid"
-
-          get_tunnel_url() {
-            local logfile="$1"
-            local url=""
-            for _ in $(seq 1 60); do
-              url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$logfile" 2>/dev/null | tail -n 1 || true)"
-              if [[ -n "$url" ]]; then
-                printf '%s' "$url"
-                return 0
-              fi
-              sleep 2
-            done
-            echo "Cloudflare did not issue a Quick Tunnel URL. Log: $logfile" >&2
-            tail -n 80 "$logfile" >&2 || true
-            return 1
-          }
-
-          EDITOR_URL="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-editor.log")"
-          echo "EDITOR_URL=$EDITOR_URL" >> "$GITHUB_ENV"
-          echo "Editor tunnel: $EDITOR_URL"
-
-          # The Editor and MCP process must use the very same SQLite directory.
-          # PASCAL_AUTH=proxy intentionally disables Pascal's password gate for this
-          # temporary test. The Cloudflare Quick Tunnel is NOT an authentication layer.
-          docker pull "ghcr.io/pascalorg/pascal-editor:${VERSION}"
-          docker run -d \
-            --name pascal-editor \
-            --restart unless-stopped \
-            -p 127.0.0.1:3000:3000 \
-            -v "$DATA_DIR:/data" \
-            -e PASCAL_DATA_DIR=/data \
-            -e PASCAL_PUBLIC_URL="$EDITOR_URL" \
-            -e PASCAL_AUTH=proxy \
-            "ghcr.io/pascalorg/pascal-editor:${VERSION}"
-
-          echo "Waiting for Pascal Editor health endpoint..."
-          EDITOR_READY=0
-          for _ in $(seq 1 90); do
-            CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/api/health || true)"
-            if [[ "$CODE" == "200" ]]; then
-              EDITOR_READY=1
-              break
-            fi
-            sleep 2
-          done
-          if [[ "$EDITOR_READY" != "1" ]]; then
-            echo "Pascal Editor did not become healthy. Container logs:" >&2
-            docker logs --tail 150 pascal-editor >&2 || true
-            exit 1
-          fi
-          echo "PASCAL_EDITOR_HEALTH=PASS"
-
-          # Run the complete published Pascal MCP package for the same release.
-          # It binds only to loopback; Cloudflare forwards the public tunnel to it.
+          # MCP is headless. The official Viewer package below is the only UI exposed to the user.
           (
             export PASCAL_DATA_DIR="$DATA_DIR"
             exec npm exec --yes --package="@pascal-app/mcp@${VERSION}" -- \
               pascal-mcp --http --host 127.0.0.1 --port 8787 \
               --cors-origin https://chatgpt.com \
-              --cors-origin https://chat.openai.com \
-              --cors-origin "$EDITOR_URL"
+              --cors-origin https://chat.openai.com
           ) > "$RUNNER_TEMP/pascal-mcp.log" 2>&1 < /dev/null &
           echo $! > "$RUNNER_TEMP/pascal-mcp.pid"
 
@@ -134,25 +78,18 @@ jobs:
           done
           if [[ "$MCP_READY" != "1" ]]; then
             echo "Pascal MCP did not start. MCP log:" >&2
-            tail -n 150 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
+            tail -n 180 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
             exit 1
           fi
           echo "PASCAL_MCP_LISTENER=PASS"
 
-          # Expose MCP through a separate Quick Tunnel.
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787 \
-            > "$RUNNER_TEMP/cloudflared-mcp.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/cloudflared-mcp.pid"
-          MCP_TUNNEL_BASE="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-mcp.log")"
-
-          # Perform a real MCP initialize + tools/list handshake. Try both paths to
-          # avoid silently publishing a tunnel whose endpoint path is wrong.
-          export MCP_LOCAL_BASE="http://127.0.0.1:8787"
+          # Verify a real MCP initialize, complete tool catalogue, and scene read.
           node --input-type=module <<'NODE' | tee "$RUNNER_TEMP/mcp-probe.txt"
-          const base = process.env.MCP_LOCAL_BASE;
+          const base = 'http://127.0.0.1:8787';
           const protocolVersion = '2025-06-18';
+          let sessionId;
 
-          function decode(raw) {
+          function parseBody(raw) {
             const data = raw.split(/\r?\n/).filter(line => line.startsWith('data:'))
               .map(line => line.slice(5).trimStart()).join('\n');
             if (data) return JSON.parse(data);
@@ -160,7 +97,7 @@ jobs:
             return JSON.parse(raw.trim());
           }
 
-          async function post(path, body, sessionId) {
+          async function post(path, body) {
             const headers = {
               'content-type': 'application/json',
               'accept': 'application/json, text/event-stream',
@@ -169,14 +106,14 @@ jobs:
             if (body.method !== 'initialize') headers['mcp-protocol-version'] = protocolVersion;
             const response = await fetch(`${base}${path}`, {
               method: 'POST', headers, body: JSON.stringify(body),
-              signal: AbortSignal.timeout(20000),
+              signal: AbortSignal.timeout(25000),
             });
             const raw = await response.text();
             let payload = null;
-            try { payload = decode(raw); } catch (error) {
-              throw new Error(`Cannot parse MCP response (${response.status}): ${raw.slice(0, 500)}`);
+            try { payload = parseBody(raw); } catch {
+              throw new Error(`Unparseable MCP response (${response.status}): ${raw.slice(0, 600)}`);
             }
-            return { response, payload, raw };
+            return { response, payload };
           }
 
           let connected = null;
@@ -188,249 +125,694 @@ jobs:
                 params: {
                   protocolVersion,
                   capabilities: {},
-                  clientInfo: { name: 'pascal-github-actions-probe', version: '1.0.0' },
+                  clientInfo: { name: 'pascal-viewer-workflow', version: '1.0.0' },
                 },
               });
               if (init.response.status === 404 || init.response.status === 405) continue;
               if (!init.response.ok || init.payload?.error) {
                 throw new Error(`initialize failed ${init.response.status}: ${JSON.stringify(init.payload)}`);
               }
-              const sessionId = init.response.headers.get('mcp-session-id') || undefined;
-              await post(path, { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId);
+              sessionId = init.response.headers.get('mcp-session-id') || undefined;
+              await post(path, { jsonrpc: '2.0', method: 'notifications/initialized' });
               const listed = await post(path, {
                 jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
-              }, sessionId);
+              });
               if (!listed.response.ok || listed.payload?.error) {
-                throw new Error(`tools/list failed ${listed.response.status}: ${JSON.stringify(listed.payload)}`);
+                throw new Error(`tools/list failed: ${JSON.stringify(listed.payload)}`);
               }
               const tools = listed.payload?.result?.tools;
-              if (!Array.isArray(tools) || tools.length === 0) {
-                throw new Error(`tools/list returned no tools: ${JSON.stringify(listed.payload).slice(0, 700)}`);
+              if (!Array.isArray(tools) || !tools.length) throw new Error('MCP returned an empty tool list.');
+              const names = new Set(tools.map(tool => tool.name));
+              const required = ['get_scene', 'list_scenes', 'save_scene', 'export_json', 'load_scene'];
+              const missing = required.filter(name => !names.has(name));
+              if (missing.length) throw new Error(`Required Pascal tools are missing: ${missing.join(', ')}`);
+              const scene = await post(path, {
+                jsonrpc: '2.0', id: 3, method: 'tools/call',
+                params: { name: 'get_scene', arguments: {} },
+              });
+              if (!scene.response.ok || scene.payload?.error || scene.payload?.result?.isError) {
+                throw new Error(`get_scene failed: ${JSON.stringify(scene.payload).slice(0, 900)}`);
               }
-              connected = { path, sessionId, tools };
+              connected = { path, tools };
               break;
-            } catch (error) {
-              lastError = error;
-            }
+            } catch (error) { lastError = error; }
           }
-
           if (!connected) throw new Error(`MCP handshake failed: ${lastError?.message || 'endpoint not found'}`);
-
           console.log(`MCP_PATH=${connected.path}`);
           console.log(`MCP_TOOLS_COUNT=${connected.tools.length}`);
           console.log(`MCP_TOOLS=${connected.tools.map(tool => tool.name).join(',')}`);
-
-          // A read-only call proves that the tool catalogue is usable, not merely listed.
-          const scene = await post(connected.path, {
-            jsonrpc: '2.0', id: 3, method: 'tools/call',
-            params: { name: 'get_scene', arguments: {} },
-          }, connected.sessionId);
-          if (!scene.response.ok || scene.payload?.error || scene.payload?.result?.isError) {
-            throw new Error(`get_scene probe failed: ${JSON.stringify(scene.payload).slice(0, 900)}`);
-          }
           console.log('MCP_GET_SCENE=PASS');
+          console.log('MCP_REQUIRED_TOOLS=PASS');
           NODE
 
           MCP_PATH="$(sed -n 's/^MCP_PATH=//p' "$RUNNER_TEMP/mcp-probe.txt" | tail -n 1)"
           MCP_TOOLS_COUNT="$(sed -n 's/^MCP_TOOLS_COUNT=//p' "$RUNNER_TEMP/mcp-probe.txt" | tail -n 1)"
           if [[ -z "$MCP_PATH" || -z "$MCP_TOOLS_COUNT" ]]; then
             echo "MCP probe did not report a usable tool catalogue." >&2
-            tail -n 150 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
+            tail -n 180 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
             exit 1
           fi
+
+          # Publish only the MCP endpoint. No public Editor tunnel is created.
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787 \
+            > "$RUNNER_TEMP/cloudflared-mcp.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/cloudflared-mcp.pid"
+
+          get_tunnel_url() {
+            local logfile="$1"
+            local url=""
+            for _ in $(seq 1 60); do
+              url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$logfile" 2>/dev/null | tail -n 1 || true)"
+              if [[ -n "$url" ]]; then printf '%s' "$url"; return 0; fi
+              sleep 2
+            done
+            echo "Cloudflare did not issue a Quick Tunnel URL. Log: $logfile" >&2
+            tail -n 100 "$logfile" >&2 || true
+            return 1
+          }
+
+          MCP_TUNNEL_BASE="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-mcp.log")"
           MCP_URL="${MCP_TUNNEL_BASE}${MCP_PATH}"
           echo "MCP_URL=$MCP_URL" >> "$GITHUB_ENV"
           echo "MCP_TOOLS_COUNT=$MCP_TOOLS_COUNT" >> "$GITHUB_ENV"
           echo "MCP endpoint: $MCP_URL"
           echo "MCP tools discovered: $MCP_TOOLS_COUNT"
 
-          # A small monitor page. The 3D canvas itself is Pascal's official public
-          # embed viewer, not a second renderer or a fake screenshot.
-          cat > "$RUNNER_TEMP/pascal-monitor.mjs" <<'MONITOR'
-          import http from 'node:http';
+          # Generate a small React host around Pascal's official read-only Viewer.
+          cd "$APP_DIR"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund \
+            "@pascal-app/core@${VERSION}" \
+            "@pascal-app/viewer@${VERSION}" \
+            "@pascal-app/nodes@${VERSION}" \
+            "react@^19" "react-dom@^19" \
+            "next@latest" \
+            "three@^0.186.1" \
+            "@react-three/fiber@^9.8.2" \
+            "@react-three/drei@^10.7.9" \
+            "lucide-react" "zustand@^5" "vite@^7"
 
-          const editorUrl = process.env.EDITOR_PUBLIC_URL;
-          const mcpUrl = process.env.MCP_PUBLIC_URL;
-          const mcpLocalPath = process.env.MCP_LOCAL_PATH || '/mcp';
-          if (!editorUrl || !mcpUrl) throw new Error('Missing editor/MCP public URL');
-
-          const html = `<!doctype html>
+          cat > index.html <<'HTML'
+          <!doctype html>
           <html lang="fa" dir="rtl">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width,initial-scale=1">
-            <meta name="color-scheme" content="dark">
-            <title>Pascal Live Monitor</title>
-            <style>
-              *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;background:#0b1018;color:#e8edf5;font-family:Segoe UI,Tahoma,Arial,sans-serif}
-              .app{height:100dvh;display:flex;flex-direction:column}.bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:#111a27;border-bottom:1px solid #273449}
-              .brand{font-weight:800;letter-spacing:.4px;margin-left:8px}.brand small{display:block;color:#94a3b8;font-size:11px;font-weight:400;letter-spacing:0}
-              .status{display:inline-flex;align-items:center;gap:6px;color:#aebbd0;font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:#64748b}.dot.ok{background:#22c55e}.dot.bad{background:#ef4444}
-              input{min-width:220px;flex:1;max-width:560px;background:#0b1220;border:1px solid #334155;color:#e8edf5;border-radius:8px;padding:9px 11px;direction:ltr;text-align:left}
-              button,.link{border:1px solid #3b4b63;background:#1a2738;color:#e8edf5;padding:9px 12px;border-radius:8px;cursor:pointer;text-decoration:none;font-size:13px;white-space:nowrap}
-              button:hover,.link:hover{background:#263850}.viewer{position:relative;flex:1;min-height:0;background:#090e16}.viewer iframe{width:100%;height:100%;border:0;background:#090e16}.empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:24px;background:radial-gradient(ellipse at center,#172538,#090e16 72%);color:#cbd5e1;pointer-events:none}.empty .box{max-width:620px;line-height:1.9}.empty strong{color:white;font-size:19px}.footer{padding:7px 14px;color:#8795aa;font-size:11px;background:#111a27;border-top:1px solid #273449;display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap}
-              @media(max-width:700px){.brand{width:100%}input{max-width:none;min-width:100%}.bar{gap:8px}.link,button{flex:1;text-align:center}}
-            </style>
-          </head>
-          <body>
-            <main class="app">
-              <header class="bar">
-                <div class="brand">PASCAL LIVE MONITOR<small>نمای زندهٔ سه‌بعدی پروژه</small></div>
-                <span class="status"><i id="edDot" class="dot"></i><span id="edText">Editor…</span></span>
-                <span class="status"><i id="mcpDot" class="dot"></i><span id="mcpText">MCP…</span></span>
-                <input id="sceneRef" placeholder="لینک Public Embed یا شناسهٔ صحنه را اینجا بگذار" autocomplete="off">
-                <button id="loadBtn">نمایش صحنه</button>
-                <button id="refreshBtn">تازه‌سازی</button>
-                <button id="fullBtn">تمام‌صفحه</button>
-                <a class="link" href="${editorUrl}" target="_blank" rel="noopener">بازکردن Editor</a>
-              </header>
-              <section class="viewer" id="viewer">
-                <iframe id="sceneFrame" title="Pascal 3D scene monitor" allow="fullscreen" allowfullscreen></iframe>
-                <div class="empty" id="empty"><div class="box"><strong>هنوز صحنه‌ای انتخاب نشده</strong><br>در Pascal وارد پروژه شو، از منوی Share گزینهٔ Public Link را روشن کن و لینک یا شناسهٔ صحنه را اینجا وارد کن.<br>این پنجره از Viewer رسمی Pascal استفاده می‌کند؛ با ماوس بچرخان و با چرخ ماوس نزدیک/دور شو.</div></div>
-              </section>
-              <footer class="footer"><span>نمایشگر فقط‌خواندنی است؛ برای ویرایش از Editor استفاده کن.</span><span>تغییرات زنده به ذخیره‌شدن پروژه و همگام‌بودن Editor/MCP وابسته‌اند.</span></footer>
-            </main>
-            <script>
-              const EDITOR = ${JSON.stringify(editorUrl)};
-              const MCP = ${JSON.stringify(mcpUrl)};
-              const frame = document.getElementById('sceneFrame');
-              const input = document.getElementById('sceneRef');
-              const empty = document.getElementById('empty');
-              function embedUrl(raw){
-                raw = (raw || '').trim();
-                if (!raw) throw new Error('لینک یا شناسهٔ صحنه خالی است.');
-                const base = new URL(EDITOR);
-                if (/^https:\/\//i.test(raw)) {
-                  const u = new URL(raw);
-                  const match = u.pathname.match(/^\/embed\/([^/]+)/);
-                  if (!match) throw new Error('لینک باید از نوع /embed/ باشد.');
-                  if (u.hostname !== base.hostname) throw new Error('لینک باید متعلق به همین نشست Pascal باشد.');
-                  return u.href;
-                }
-                const match = raw.match(/\/embed\/([^/?#]+)/);
-                const id = match ? match[1] : raw;
-                if (!/^[A-Za-z0-9_-]{3,180}$/.test(id)) throw new Error('شناسهٔ صحنه معتبر نیست.');
-                return new URL('/embed/' + encodeURIComponent(id), base.origin).href;
-              }
-              function loadScene(){
-                try {
-                  const url = embedUrl(input.value);
-                  frame.src = url;
-                  empty.style.display = 'none';
-                  localStorage.setItem('pascal-monitor-scene', input.value.trim());
-                } catch (e) { alert(e.message); }
-              }
-              document.getElementById('loadBtn').addEventListener('click', loadScene);
-              input.addEventListener('keydown', e => { if (e.key === 'Enter') loadScene(); });
-              document.getElementById('refreshBtn').addEventListener('click', () => { if (frame.src) frame.src = frame.src; });
-              document.getElementById('fullBtn').addEventListener('click', async () => {
-                const target = document.getElementById('viewer');
-                try { if (document.fullscreenElement) await document.exitFullscreen(); else await target.requestFullscreen(); }
-                catch (e) { console.error(e); }
+            <head>
+              <meta charset="UTF-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+              <meta name="color-scheme" content="dark" />
+              <title>Pascal 3D Viewer</title>
+            </head>
+            <body>
+              <div id="root"></div>
+              <script type="module" src="/src/main.jsx"></script>
+            </body>
+          </html>
+          HTML
+
+          cat > src/main.jsx <<'JS'
+          import React, { useEffect, useState } from 'react';
+          import { createRoot } from 'react-dom/client';
+          import { loadPlugin, useScene, nodeRegistry } from '@pascal-app/core';
+          import { builtinPlugin } from '@pascal-app/nodes';
+          import { Viewer, useViewer } from '@pascal-app/viewer';
+          import './style.css';
+
+          const registryReady = loadPlugin(builtinPlugin);
+
+          function selectDefaultLevel(graph) {
+            const nodes = graph?.nodes || {};
+            const building = Object.values(nodes).find(node => node?.type === 'building');
+            if (!building) return;
+            const childIds = Array.isArray(building.children) ? building.children : [];
+            const levels = childIds.map(id => nodes[id]).filter(node => node?.type === 'level');
+            const level = levels.find(node => node.level === 0) || levels[0];
+            if (level) {
+              useViewer.getState().setSelection({
+                buildingId: building.id,
+                levelId: level.id,
+                selectedIds: [],
+                zoneId: null,
               });
-              const saved = localStorage.getItem('pascal-monitor-scene');
-              if (saved) { input.value = saved; try { frame.src = embedUrl(saved); empty.style.display = 'none'; } catch {} }
-              async function status(){
+            }
+          }
+
+          function normalizeNodes(nodes) {
+            return Object.fromEntries(Object.entries(nodes).map(([id, value]) => {
+              if (!value || typeof value !== 'object' || Array.isArray(value)) return [id, value];
+              const type = value.type;
+              if (typeof type !== 'string') return [id, value];
+              const parsed = nodeRegistry.get(type)?.schema.safeParse(value);
+              return [id, parsed?.success ? parsed.data : value];
+            }));
+          }
+
+          function applyGraph(graph) {
+            if (!graph || !graph.nodes || !Array.isArray(graph.rootNodeIds)) return;
+            const options = {};
+            if (graph.collections) options.collections = graph.collections;
+            if (graph.materials) options.materials = graph.materials;
+            if (Array.isArray(graph.installedPlugins)) options.installedPlugins = graph.installedPlugins;
+            useScene.getState().setScene(
+              normalizeNodes(graph.nodes),
+              graph.rootNodeIds,
+              options,
+            );
+            selectDefaultLevel(graph);
+          }
+
+          function App() {
+            const [ready, setReady] = useState(false);
+            const [meta, setMeta] = useState({
+              projectName: 'Pascal Building Project',
+              fileName: 'Main_Scene.scene.json',
+            });
+            const [saving, setSaving] = useState(false);
+            const [saved, setSaved] = useState(false);
+            const [error, setError] = useState('');
+
+            useEffect(() => {
+              let stopped = false;
+              let lastGraph = '';
+              let timer;
+
+              const start = async () => {
                 try {
-                  const r = await fetch('/api/status', {cache:'no-store'});
-                  const s = await r.json();
-                  document.getElementById('edDot').className = 'dot ' + (s.editor ? 'ok' : 'bad');
-                  document.getElementById('edText').textContent = s.editor ? 'Editor متصل' : 'Editor قطع';
-                  document.getElementById('mcpDot').className = 'dot ' + (s.mcp ? 'ok' : 'bad');
-                  document.getElementById('mcpText').textContent = s.mcp ? 'MCP متصل' : 'MCP قطع';
-                } catch {
-                  document.getElementById('edDot').className = 'dot bad';
-                  document.getElementById('mcpDot').className = 'dot bad';
+                  await registryReady;
+                  if (stopped) return;
+                  setReady(true);
+                } catch (e) {
+                  setError(`راه‌اندازی نمایشگر ناموفق بود: ${e?.message || e}`);
+                  return;
                 }
+
+                const poll = async () => {
+                  if (stopped) return;
+                  try {
+                    const response = await fetch('/api/state', { cache: 'no-store' });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const data = await response.json();
+                    if (data.meta) setMeta(data.meta);
+                    if (data.graph) {
+                      const signature = JSON.stringify(data.graph);
+                      if (signature !== lastGraph) {
+                        applyGraph(data.graph);
+                        lastGraph = signature;
+                        setError('');
+                      }
+                    }
+                  } catch (e) {
+                    setError(`ارتباط نمایش زنده قطع شده است: ${e?.message || e}`);
+                  } finally {
+                    if (!stopped) timer = setTimeout(poll, 1100);
+                  }
+                };
+                poll();
+              };
+
+              start();
+              return () => {
+                stopped = true;
+                if (timer) clearTimeout(timer);
+              };
+            }, []);
+
+            const saveScene = async () => {
+              if (saving) return;
+              setSaving(true);
+              setSaved(false);
+              setError('');
+              try {
+                const response = await fetch('/api/save', { method: 'POST' });
+                if (!response.ok) {
+                  const message = await response.text();
+                  throw new Error(message || `HTTP ${response.status}`);
+                }
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const anchor = document.createElement('a');
+                anchor.href = url;
+                anchor.download = (meta.fileName || 'Main_Scene.scene.json').replace(/\.scene\.json$/i, '.pascal-backup.zip').replace(/\.json$/i, '.pascal-backup.zip');
+                document.body.appendChild(anchor);
+                anchor.click();
+                anchor.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 3000);
+                setSaved(true);
+                setTimeout(() => setSaved(false), 2500);
+              } catch (e) {
+                setError(`ذخیره انجام نشد: ${e?.message || e}`);
+              } finally {
+                setSaving(false);
               }
-              status(); setInterval(status, 5000);
-            </script>
-          </body>
-          </html>`;
+            };
+
+            return (
+              <main className="app-shell">
+                <header className="topbar">
+                  <div className="meta-block">
+                    <span className="meta-label">پروژه</span>
+                    <strong className="meta-value" title={meta.projectName}>{meta.projectName}</strong>
+                  </div>
+                  <div className="meta-block file-block">
+                    <span className="meta-label">نام فایل</span>
+                    <strong className="meta-value" title={meta.fileName}>{meta.fileName}</strong>
+                  </div>
+                  <button className="save-button" onClick={saveScene} disabled={saving || !ready}>
+                    {saving ? 'در حال ذخیره…' : saved ? 'ذخیره شد' : 'ذخیره'}
+                  </button>
+                </header>
+                <section className="viewer-area">
+                  {ready ? <Viewer /> : <div className="loading">در حال آماده‌سازی نمایشگر سه‌بعدی…</div>}
+                  {error && <div className="error-message">{error}</div>}
+                </section>
+              </main>
+            );
+          }
+
+          createRoot(document.getElementById('root')).render(<App />);
+          JS
+
+          cat > src/style.css <<'CSS'
+          * { box-sizing: border-box; }
+          html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+          body { background: #0b1018; color: #eef2f7; font-family: Segoe UI, Tahoma, Arial, sans-serif; }
+          .app-shell { width: 100%; height: 100dvh; display: flex; flex-direction: column; background: #0b1018; }
+          .topbar { flex: 0 0 auto; min-height: 66px; display: flex; align-items: center; gap: 26px; padding: 10px 18px; background: #111a27; border-bottom: 1px solid #28364a; }
+          .meta-block { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+          .file-block { flex: 1; }
+          .meta-label { color: #94a3b8; font-size: 11px; }
+          .meta-value { color: #f1f5f9; font-size: 14px; font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: auto; }
+          .save-button { flex: 0 0 auto; min-width: 92px; border: 1px solid #53657c; border-radius: 8px; padding: 10px 18px; background: #243449; color: white; font-size: 13px; font-weight: 700; cursor: pointer; }
+          .save-button:hover:not(:disabled) { background: #30445d; }
+          .save-button:disabled { opacity: .55; cursor: default; }
+          .viewer-area { position: relative; flex: 1; min-height: 0; overflow: hidden; background: #090e16; }
+          .viewer-area > * { width: 100%; height: 100%; }
+          .loading { display: grid; place-items: center; color: #aebbd0; font-size: 14px; }
+          .error-message { position: absolute; right: 16px; bottom: 16px; max-width: min(680px, calc(100% - 32px)); padding: 9px 13px; border-radius: 8px; background: rgba(105, 30, 30, .92); color: #fff1f1; font-size: 12px; line-height: 1.6; pointer-events: none; }
+          @media (max-width: 620px) { .topbar { gap: 12px; padding: 8px 10px; } .meta-value { max-width: 34vw; font-size: 12px; } .save-button { min-width: 72px; padding: 9px 10px; } }
+          CSS
+
+          cat > package.json.tmp <<'JSON'
+          {"scripts":{"build":"vite build"},"type":"module"}
+          JSON
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));const q=JSON.parse(fs.readFileSync('package.json.tmp'));p.scripts=q.scripts;p.type=q.type;fs.writeFileSync('package.json',JSON.stringify(p,null,2));fs.unlinkSync('package.json.tmp')"
+          npx vite build
+
+          # MCP-backed state service. The browser can read the graph and request one safe save operation;
+          # it cannot call arbitrary MCP tools and has no project/editor controls.
+          cat > "$RUNNER_TEMP/pascal-viewer-server.mjs" <<'SERVER'
+          import http from 'node:http';
+          import fs from 'node:fs/promises';
+          import { createReadStream } from 'node:fs';
+          import path from 'node:path';
+          import os from 'node:os';
+          import crypto from 'node:crypto';
+          import { execFile } from 'node:child_process';
+          import { promisify } from 'node:util';
+
+          const execFileAsync = promisify(execFile);
+          const APP_DIR = process.env.APP_DIR;
+          const DATA_DIR = process.env.PASCAL_DATA_DIR;
+          const MCP_BASE = process.env.MCP_LOCAL_BASE || 'http://127.0.0.1:8787';
+          const MCP_PATH = process.env.MCP_PATH || '/mcp';
+          const PROJECT_NAME_DEFAULT = process.env.PASCAL_PROJECT_NAME || 'Pascal Building Project';
+          const FILE_NAME_DEFAULT = process.env.PASCAL_SCENE_FILE_NAME || 'Main_Scene.scene.json';
+          const PROTOCOL_VERSION = '2025-06-18';
+          let sessionId;
+          let requestId = 1;
+          let requestQueue = Promise.resolve();
+          let projectId = null;
+          let sceneId = null;
+          let loadedVersion = 0;
+          let projectName = PROJECT_NAME_DEFAULT;
+          let fileName = FILE_NAME_DEFAULT;
+          let sceneName = path.basename(FILE_NAME_DEFAULT).replace(/\.scene\.json$/i, '').replace(/\.json$/i, '').replace(/[_-]+/g, ' ') || 'Main Scene';
+          let latestGraph = null;
+          let latestGraphHash = '';
+          let lastError = '';
+
+          function parseMcpBody(raw) {
+            const dataLines = raw.split(/\r?\n/).filter(line => line.startsWith('data:'));
+            if (dataLines.length) return JSON.parse(dataLines.map(line => line.slice(5).trimStart()).join('\n'));
+            if (!raw.trim()) return null;
+            return JSON.parse(raw.trim());
+          }
+
+          async function mcpPost(body) {
+            const headers = {
+              'content-type': 'application/json',
+              'accept': 'application/json, text/event-stream',
+            };
+            if (sessionId) headers['mcp-session-id'] = sessionId;
+            if (body.method !== 'initialize') headers['mcp-protocol-version'] = PROTOCOL_VERSION;
+            const response = await fetch(`${MCP_BASE}${MCP_PATH}`, {
+              method: 'POST', headers, body: JSON.stringify(body),
+              signal: AbortSignal.timeout(25000),
+            });
+            const raw = await response.text();
+            let payload = null;
+            try { payload = parseMcpBody(raw); } catch (error) {
+              throw new Error(`Invalid MCP response ${response.status}: ${raw.slice(0, 600)}`);
+            }
+            if (!response.ok) throw new Error(`MCP HTTP ${response.status}: ${raw.slice(0, 600)}`);
+            return { response, payload };
+          }
+
+          async function rpc(method, params = {}) {
+            const id = requestId++;
+            const { payload } = await mcpPost({ jsonrpc: '2.0', id, method, params });
+            if (payload?.error) throw new Error(payload.error.message || JSON.stringify(payload.error));
+            return payload?.result;
+          }
+
+          async function initializeMcp() {
+            const { response, payload } = await mcpPost({
+              jsonrpc: '2.0', id: requestId++, method: 'initialize',
+              params: {
+                protocolVersion: PROTOCOL_VERSION,
+                capabilities: {},
+                clientInfo: { name: 'pascal-read-only-viewer', version: '1.0.0' },
+              },
+            });
+            if (payload?.error) throw new Error(`MCP initialize: ${payload.error.message}`);
+            sessionId = response.headers.get('mcp-session-id') || undefined;
+            await mcpPost({ jsonrpc: '2.0', method: 'notifications/initialized' });
+            const result = await rpc('tools/list', {});
+            const names = new Set((result?.tools || []).map(tool => tool.name));
+            for (const required of ['get_scene', 'list_scenes', 'save_scene', 'export_json', 'load_scene']) {
+              if (!names.has(required)) throw new Error(`Pascal MCP is missing required tool: ${required}`);
+            }
+          }
+
+          function queueMcp(work) {
+            const task = requestQueue.then(work, work);
+            requestQueue = task.catch(() => {});
+            return task;
+          }
+
+          function unwrapToolResult(result) {
+            if (result?.isError) {
+              const message = result.content?.map(item => item.text || '').join('\n') || 'Pascal MCP tool failed';
+              throw new Error(message);
+            }
+            if (result?.structuredContent) return result.structuredContent;
+            const text = result?.content?.find(item => item.type === 'text')?.text;
+            if (typeof text === 'string') {
+              try { return JSON.parse(text); } catch { return { text }; }
+            }
+            return result ?? {};
+          }
+
+          async function tool(name, args = {}) {
+            const result = await rpc('tools/call', { name, arguments: args });
+            return unwrapToolResult(result);
+          }
+
+          function extractGraph(value) {
+            if (value?.scene?.nodes) return value.scene;
+            if (value?.graph?.nodes) return value.graph;
+            if (value?.nodes && Array.isArray(value.rootNodeIds)) return value;
+            return null;
+          }
+
+          function fileSafeName(value) {
+            const safe = path.basename(String(value || FILE_NAME_DEFAULT)).replace(/[^\p{L}\p{N}._ -]+/gu, '_');
+            return safe.toLowerCase().endsWith('.json') ? safe : `${safe}.scene.json`;
+          }
+
+          async function initializeWorkspace() {
+            const listed = await tool('list_scenes', { limit: 1000 });
+            const scenes = Array.isArray(listed?.scenes) ? listed.scenes : [];
+
+            if (scenes.length) {
+              scenes.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+              const selected = scenes[0];
+              sceneId = selected.id;
+              projectId = selected.projectId || null;
+              await tool('load_scene', { id: sceneId });
+              loadedVersion = Number(selected.version || 0);
+              if (projectId) {
+                try {
+                  const project = await tool('get_project_status', { id: projectId });
+                  projectName = project?.name || selected.name || PROJECT_NAME_DEFAULT;
+                } catch { projectName = selected.name || PROJECT_NAME_DEFAULT; }
+              } else {
+                projectName = selected.name || PROJECT_NAME_DEFAULT;
+              }
+              const base = (selected.name || sceneName).trim().replace(/\s+/g, '_');
+              fileName = fileSafeName(`${base}.scene.json`);
+              sceneName = selected.name || sceneName;
+              return;
+            }
+
+            projectName = PROJECT_NAME_DEFAULT;
+            fileName = fileSafeName(FILE_NAME_DEFAULT);
+            // Prefer a named Pascal project when this server supports it. If the
+            // headless/local store has no account-backed project service, save a
+            // standalone scene instead; the viewer still works without a cloud project.
+            try {
+              const created = await tool('create_project', { name: projectName, isPrivate: true });
+              projectId = created?.projectId || created?.id || null;
+            } catch (error) {
+              projectId = null;
+              console.log(`PROJECT_MODE=standalone_scene (${error?.message || error})`);
+            }
+
+            const saveArgs = {
+              name: sceneName,
+              includeCurrentScene: true,
+              saveMode: 'draft',
+            };
+            if (projectId) saveArgs.projectId = projectId;
+            else saveArgs.id = `scene_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
+            const saved = await tool('save_scene', saveArgs);
+            sceneId = saved?.id || saveArgs.id || null;
+            loadedVersion = Number(saved?.version || 0);
+            if (!sceneId) throw new Error(`save_scene returned no scene ID: ${JSON.stringify(saved).slice(0, 500)}`);
+            await tool('load_scene', { id: sceneId });
+          }
+
+          async function refreshGraph() {
+            // A second MCP client (ChatGPT) may have saved a newer checkpoint.
+            // Reload the current scene when its database version advances, so this viewer
+            // stays live even when the MCP host gives clients separate bridge sessions.
+            if (sceneId) {
+              try {
+                const listed = await tool('list_scenes', { limit: 1000 });
+                const stored = (listed?.scenes || []).find(scene => scene.id === sceneId);
+                const storedVersion = Number(stored?.version || 0);
+                if (stored && storedVersion > loadedVersion) {
+                  await tool('load_scene', { id: sceneId });
+                  loadedVersion = storedVersion;
+                }
+              } catch (versionError) {
+                // get_scene below remains useful for shared in-memory sessions.
+              }
+            }
+            const value = await tool('get_scene', {});
+            const graph = extractGraph(value);
+            if (!graph) throw new Error(`get_scene did not return a SceneGraph: ${JSON.stringify(value).slice(0, 500)}`);
+            const serialized = JSON.stringify(graph);
+            const hash = crypto.createHash('sha256').update(serialized).digest('hex');
+            if (hash !== latestGraphHash) {
+              latestGraphHash = hash;
+              latestGraph = graph;
+            }
+            lastError = '';
+          }
+
+          function meta() {
+            return { projectName, fileName, sceneId, projectId };
+          }
+
+          const mime = {
+            '.html': 'text/html; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.svg': 'image/svg+xml',
+            '.json': 'application/json; charset=utf-8',
+            '.png': 'image/png',
+            '.woff2': 'font/woff2',
+          };
+
+          async function sendFile(req, res, pathname) {
+            let relative = decodeURIComponent(pathname === '/' ? '/index.html' : pathname);
+            relative = path.normalize(relative).replace(/^([/\\]|\.\.(?:[/\\]|$))+/, '');
+            let full = path.join(APP_DIR, 'dist', relative);
+            try {
+              const stat = await fs.stat(full);
+              if (stat.isDirectory()) full = path.join(full, 'index.html');
+              const body = await fs.readFile(full);
+              res.writeHead(200, { 'content-type': mime[path.extname(full)] || 'application/octet-stream', 'cache-control': 'no-store' });
+              res.end(body);
+            } catch {
+              const body = await fs.readFile(path.join(APP_DIR, 'dist', 'index.html'));
+              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+              res.end(body);
+            }
+          }
 
           const server = http.createServer(async (req, res) => {
-            if (req.url === '/api/status') {
-              const timeout = AbortSignal.timeout(3500);
-              let editor = false;
-              let mcp = false;
-              try { const r = await fetch('http://127.0.0.1:3000/api/health', { signal: timeout }); editor = r.status === 200; } catch {}
-              try {
-                const r = await fetch(`http://127.0.0.1:8787${mcpLocalPath}`, { method: 'GET', signal: timeout });
-                mcp = r.status !== 404 && r.status < 500;
-              } catch {}
-              res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-              res.end(JSON.stringify({ editor, mcp, at: new Date().toISOString() }));
-              return;
+            try {
+              const url = new URL(req.url || '/', 'http://127.0.0.1');
+              if (req.method === 'GET' && url.pathname === '/api/state') {
+                if (!latestGraph) await queueMcp(refreshGraph);
+                res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+                res.end(JSON.stringify({ graph: latestGraph, meta: meta(), error: lastError }));
+                return;
+              }
+
+              if (req.method === 'POST' && url.pathname === '/api/save') {
+                await queueMcp(async () => {
+                  const saveArgs = {
+                    name: sceneName,
+                    includeCurrentScene: true,
+                    saveMode: 'checkpoint',
+                  };
+                  if (projectId) saveArgs.projectId = projectId;
+                  const saved = await tool('save_scene', saveArgs);
+                  if (saved?.id) sceneId = saved.id;
+                  if (saved?.version !== undefined) loadedVersion = Number(saved.version || loadedVersion);
+
+                  const exported = await tool('export_json', { pretty: true });
+                  let jsonText = typeof exported?.json === 'string' ? exported.json : null;
+                  if (!jsonText && typeof exported?.text === 'string') jsonText = exported.text;
+                  if (!jsonText) jsonText = JSON.stringify(latestGraph || await extractGraph(await tool('get_scene', {})), null, 2);
+                  if (!jsonText || jsonText === 'null') throw new Error('Pascal returned no scene JSON to include in the backup.');
+
+                  // Back up the full Pascal data directory as well as the portable SceneGraph JSON.
+                  // This keeps SQLite, WAL files, and Pascal's adjacent geometry-artifact folder together.
+                  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pascal-save-'));
+                  const payloadDir = path.join(workDir, 'Pascal_Project_Backup');
+                  await fs.mkdir(payloadDir, { recursive: true });
+                  await fs.cp(DATA_DIR, path.join(payloadDir, 'pascal-data'), { recursive: true, force: true });
+                  const sceneJsonName = fileSafeName(fileName);
+                  await fs.writeFile(path.join(payloadDir, sceneJsonName), jsonText, 'utf8');
+                  await fs.writeFile(path.join(payloadDir, 'project-manifest.json'), JSON.stringify({
+                    projectName,
+                    projectId,
+                    sceneName,
+                    sceneId,
+                    sceneFileName: sceneJsonName,
+                    savedVersion: saved?.version ?? null,
+                    savedAt: new Date().toISOString(),
+                    contents: ['pascal-data/ (SQLite database and adjacent artifacts)', sceneJsonName],
+                  }, null, 2), 'utf8');
+
+                  const archiveName = sceneJsonName.replace(/\.scene\.json$/i, '.pascal-backup.zip').replace(/\.json$/i, '.pascal-backup.zip');
+                  const archivePath = path.join(os.tmpdir(), `pascal-backup-${crypto.randomUUID()}.zip`);
+                  await execFileAsync('zip', ['-q', '-r', archivePath, 'Pascal_Project_Backup'], { cwd: workDir, maxBuffer: 16 * 1024 * 1024 });
+                  const stat = await fs.stat(archivePath);
+                  res.writeHead(200, {
+                    'content-type': 'application/zip',
+                    'content-length': stat.size,
+                    'content-disposition': `attachment; filename="${archiveName.replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(archiveName)}`,
+                    'cache-control': 'no-store',
+                    'x-pascal-saved': '1',
+                    'x-pascal-backup-name': archiveName,
+                  });
+                  const stream = createReadStream(archivePath);
+                  stream.on('error', error => res.destroy(error));
+                  stream.on('close', () => {
+                    fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
+                    fs.rm(archivePath, { force: true }).catch(() => {});
+                  });
+                  stream.pipe(res);
+                });
+                return;
+              }
+
+              if (req.method === 'GET') {
+                await sendFile(req, res, url.pathname);
+                return;
+              }
+              res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8' });
+              res.end('Method not allowed');
+            } catch (error) {
+              lastError = error?.message || String(error);
+              if (!res.headersSent) res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+              res.end(lastError);
             }
-            if (req.url === '/' || req.url?.startsWith('/?')) {
-              res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-              res.end(html);
-              return;
-            }
-            res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
-            res.end('Not found');
           });
-          server.listen(8090, '127.0.0.1', () => console.log('Pascal monitor listening on 127.0.0.1:8090'));
-          MONITOR
 
-          EDITOR_PUBLIC_URL="$EDITOR_URL" \
-          MCP_PUBLIC_URL="$MCP_URL" \
-          MCP_LOCAL_PATH="$MCP_PATH" \
-          nohup node "$RUNNER_TEMP/pascal-monitor.mjs" \
-            > "$RUNNER_TEMP/pascal-monitor.log" 2>&1 < /dev/null &
-          echo $! > "$RUNNER_TEMP/pascal-monitor.pid"
+          async function pollForever() {
+            try { await queueMcp(refreshGraph); }
+            catch (error) { lastError = error?.message || String(error); }
+            setTimeout(pollForever, 950).unref?.();
+          }
 
-          echo "Waiting for monitor page..."
-          MONITOR_READY=0
-          for _ in $(seq 1 30); do
+          await initializeMcp();
+          await queueMcp(initializeWorkspace);
+          await queueMcp(refreshGraph);
+          server.listen(8090, '127.0.0.1', () => {
+            console.log(`Pascal read-only viewer server listening on 127.0.0.1:8090`);
+            console.log(`PROJECT_NAME=${projectName}`);
+            console.log(`SCENE_FILE_NAME=${fileName}`);
+            console.log(`SCENE_ID=${sceneId || 'not-yet-saved'}`);
+          });
+          pollForever();
+          SERVER
+
+          APP_DIR="$APP_DIR" \
+          MCP_LOCAL_BASE="http://127.0.0.1:8787" \
+          MCP_PATH="$MCP_PATH" \
+          PASCAL_PROJECT_NAME="$PROJECT_NAME" \
+          PASCAL_SCENE_FILE_NAME="$SCENE_FILE_NAME" \
+          PASCAL_DATA_DIR="$DATA_DIR" \
+          nohup node "$RUNNER_TEMP/pascal-viewer-server.mjs" \
+            > "$RUNNER_TEMP/pascal-viewer-server.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/pascal-viewer-server.pid"
+
+          echo "Waiting for read-only 3D viewer..."
+          VIEWER_READY=0
+          for _ in $(seq 1 90); do
             CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/ || true)"
-            if [[ "$CODE" == "200" ]]; then MONITOR_READY=1; break; fi
+            if [[ "$CODE" == "200" ]]; then VIEWER_READY=1; break; fi
+            if ! kill -0 "$(cat "$RUNNER_TEMP/pascal-viewer-server.pid")" 2>/dev/null; then
+              echo "Viewer server exited unexpectedly:" >&2
+              cat "$RUNNER_TEMP/pascal-viewer-server.log" >&2 || true
+              exit 1
+            fi
             sleep 1
           done
-          if [[ "$MONITOR_READY" != "1" ]]; then
-            echo "Monitor failed to start:" >&2
-            cat "$RUNNER_TEMP/pascal-monitor.log" >&2 || true
+          if [[ "$VIEWER_READY" != "1" ]]; then
+            echo "Viewer page did not become ready:" >&2
+            cat "$RUNNER_TEMP/pascal-viewer-server.log" >&2 || true
             exit 1
           fi
+          echo "PASCAL_VIEWER_HEALTH=PASS"
 
           nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8090 \
-            > "$RUNNER_TEMP/cloudflared-monitor.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/cloudflared-monitor.pid"
-          MONITOR_URL="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-monitor.log")"
+            > "$RUNNER_TEMP/cloudflared-viewer.log" 2>&1 < /dev/null &
+          echo $! > "$RUNNER_TEMP/cloudflared-viewer.pid"
+          VIEWER_URL="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-viewer.log")"
 
-          echo "MONITOR_URL=$MONITOR_URL" >> "$GITHUB_ENV"
-          echo "EDITOR_URL=$EDITOR_URL" >> "$GITHUB_OUTPUT"
+          echo "VIEWER_URL=$VIEWER_URL" >> "$GITHUB_ENV"
+          echo "VIEWER_URL=$VIEWER_URL" >> "$GITHUB_OUTPUT"
           echo "MCP_URL=$MCP_URL" >> "$GITHUB_OUTPUT"
-          echo "MONITOR_URL=$MONITOR_URL" >> "$GITHUB_OUTPUT"
           echo "MCP_TOOLS_COUNT=$MCP_TOOLS_COUNT" >> "$GITHUB_OUTPUT"
 
           {
-            echo "## Pascal Live Session"
+            echo "## Pascal 3D Viewer"
             echo ""
-            echo "- **3D Monitor:** $MONITOR_URL"
-            echo "- **Pascal Editor:** $EDITOR_URL"
+            echo "- **Viewer page:** $VIEWER_URL"
             echo "- **MCP endpoint:** $MCP_URL"
             echo "- **MCP tools discovered:** $MCP_TOOLS_COUNT"
-            echo "- **Shared SQLite data:** Editor and MCP use the same mounted directory."
+            echo "- **Display:** official Pascal Viewer package; read-only; live scene polling from MCP"
+            echo "- **Controls shown:** project name, scene filename, Save"
             echo ""
-            echo "> In Pascal, open the project, choose Share → Public Link, then paste its embed URL or scene ID into the Monitor. The embed is read-only; use the Editor link to edit."
+            echo "> The viewer does not open the Pascal Editor, request a public embed link, or expose scene-editing controls. The Save button creates a Pascal checkpoint and downloads a ZIP backup containing the SQLite data folder, adjacent geometry artifacts, a portable `.scene.json`, and a manifest."
             echo ""
-            echo "> Temporary test mode: password protection is disabled. Anyone who obtains the Quick Tunnel URLs may access the Editor and call write-capable MCP tools. Stop this workflow after testing."
+            echo "> Temporary test mode: no authentication is configured. Anyone who obtains the MCP Quick Tunnel URL may call write-capable tools. Stop this workflow when testing is finished."
           } >> "$GITHUB_STEP_SUMMARY"
 
           echo "=================================================="
-          echo "PASCAL EDITOR : $EDITOR_URL"
-          echo "PASCAL MONITOR: $MONITOR_URL"
+          echo "PASCAL VIEWER : $VIEWER_URL"
           echo "PASCAL MCP    : $MCP_URL"
           echo "MCP TOOLS     : $MCP_TOOLS_COUNT"
           echo "=================================================="
-          echo ""
-          echo "The session remains online until this workflow is cancelled or times out."
+          echo "Only the viewer and MCP endpoints are public. The Pascal Editor is not exposed."
 
-      - name: Keep Pascal session alive
+      - name: Keep Pascal viewer and MCP alive
         shell: bash
         run: |
           set -Eeuo pipefail
-          while true; do
-            sleep 60
-          done
+          while true; do sleep 60; done
