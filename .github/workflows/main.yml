@@ -1,5 +1,5 @@
 
-name: Pascal Editor and MCP - Docker + Cloudflare
+name: Pascal Editor and MCP - Docker Cloudflare
 
 on:
   workflow_dispatch:
@@ -13,33 +13,25 @@ concurrency:
 
 jobs:
   pascal:
-    name: Start Pascal Editor and MCP
+    name: Pascal Editor and MCP
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
 
-      # ==============================================
-      # 1. Checkout
-      # ==============================================
+      # ==========================================
+      # 1. Environment
+      # ==========================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # ==============================================
-      # 2. Install Node.js
-      # ==============================================
 
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "22.23.4"
 
-      # ==============================================
-      # 3. Validate secrets and Docker
-      # ==============================================
-
-      - name: Validate environment
+      - name: Validate secrets
         shell: bash
         env:
           PASCAL_ADMIN_PASSWORD: ${{ secrets.PASCAL_ADMIN_PASSWORD }}
@@ -47,32 +39,27 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          if [[ -z "$PASCAL_ADMIN_PASSWORD" ]]; then
-            echo "ERROR: Missing PASCAL_ADMIN_PASSWORD secret."
+          [[ -n "$PASCAL_ADMIN_PASSWORD" ]] || {
+            echo "Missing PASCAL_ADMIN_PASSWORD"
             exit 1
-          fi
+          }
 
-          if [[ -z "$PASCAL_MCP_HTTP_TOKEN" ]]; then
-            echo "ERROR: Missing PASCAL_MCP_HTTP_TOKEN secret."
+          [[ -n "$PASCAL_MCP_HTTP_TOKEN" ]] || {
+            echo "Missing PASCAL_MCP_HTTP_TOKEN"
             exit 1
-          fi
+          }
 
-          echo "Node:"
           node --version
-
-          echo "NPM:"
           npm --version
-
-          echo "Docker:"
           docker version
 
-          echo "Required secrets: configured"
+          echo "Secrets configured."
 
-      # ==============================================
-      # 4. Prepare shared Pascal database
-      # ==============================================
+      # ==========================================
+      # 2. Shared storage
+      # ==========================================
 
-      - name: Prepare shared Pascal storage
+      - name: Prepare Pascal storage
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -83,12 +70,11 @@ jobs:
 
           echo "PASCAL_DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
 
-          echo "Pascal data directory:"
-          echo "$DATA_DIR"
+          echo "Pascal data directory prepared."
 
-      # ==============================================
-      # 5. Download Cloudflare and start two tunnels
-      # ==============================================
+      # ==========================================
+      # 3. Cloudflare tunnels
+      # ==========================================
 
       - name: Start Cloudflare Quick Tunnels
         shell: bash
@@ -100,8 +86,6 @@ jobs:
           EDITOR_LOG="${RUNNER_TEMP}/cloudflare-editor.log"
           MCP_LOG="${RUNNER_TEMP}/cloudflare-mcp.log"
 
-          echo "Downloading Cloudflare..."
-
           curl -fsSL \
             "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
             -o "$CF_BIN"
@@ -109,8 +93,6 @@ jobs:
           chmod +x "$CF_BIN"
 
           "$CF_BIN" --version
-
-          echo "Starting Pascal Editor tunnel..."
 
           nohup "$CF_BIN" tunnel \
             --url http://127.0.0.1:3000 \
@@ -120,8 +102,6 @@ jobs:
             > "$EDITOR_LOG" 2>&1 < /dev/null &
 
           EDITOR_PID=$!
-
-          echo "Starting Pascal MCP tunnel..."
 
           nohup "$CF_BIN" tunnel \
             --url http://127.0.0.1:8787 \
@@ -137,8 +117,6 @@ jobs:
 
           EDITOR_URL=""
           MCP_HOST=""
-
-          echo "Waiting for Cloudflare URLs..."
 
           for i in $(seq 1 90); do
 
@@ -156,28 +134,23 @@ jobs:
               break
             fi
 
-            if ! kill -0 "$EDITOR_PID" 2>/dev/null; then
-              echo "Editor tunnel process stopped."
+            kill -0 "$EDITOR_PID" 2>/dev/null || {
               cat "$EDITOR_LOG"
               exit 1
-            fi
+            }
 
-            if ! kill -0 "$MCP_TUNNEL_PID" 2>/dev/null; then
-              echo "MCP tunnel process stopped."
+            kill -0 "$MCP_TUNNEL_PID" 2>/dev/null || {
               cat "$MCP_LOG"
               exit 1
-            fi
+            }
 
             sleep 2
           done
 
           if [[ -z "$EDITOR_URL" || -z "$MCP_HOST" ]]; then
-            echo "Cloudflare URL detection failed."
+            echo "Could not obtain both Cloudflare URLs."
 
-            echo "Editor tunnel log:"
             tail -n 100 "$EDITOR_LOG" || true
-
-            echo "MCP tunnel log:"
             tail -n 100 "$MCP_LOG" || true
 
             exit 1
@@ -187,34 +160,29 @@ jobs:
 
           {
             echo "PASCAL_EDITOR_URL=$EDITOR_URL"
+            echo "PASCAL_MCP_HOST=$MCP_HOST"
             echo "PASCAL_MCP_URL=$MCP_URL"
           } >> "$GITHUB_ENV"
 
-          echo ""
           echo "=========================================="
-          echo "PASCAL EDITOR URL"
-          echo "$EDITOR_URL"
-          echo ""
-          echo "PASCAL MCP URL"
-          echo "$MCP_URL"
+          echo "EDITOR: $EDITOR_URL"
+          echo "MCP:    $MCP_URL"
           echo "=========================================="
 
-      # ==============================================
-      # 6. Start official Pascal Docker image
-      # ==============================================
+      # ==========================================
+      # 4. Pascal Editor Docker
+      # ==========================================
 
-      - name: Start Pascal Editor container
+      - name: Start Pascal Editor
         shell: bash
         env:
           PASCAL_ADMIN_PASSWORD: ${{ secrets.PASCAL_ADMIN_PASSWORD }}
         run: |
           set -Eeuo pipefail
 
-          echo "Pulling official Pascal image..."
-
           docker pull ghcr.io/pascalorg/pascal-editor:latest
 
-          echo "Starting Pascal Editor..."
+          docker rm -f pascal-editor 2>/dev/null || true
 
           docker run -d \
             --name pascal-editor \
@@ -227,7 +195,7 @@ jobs:
             --volume "$PASCAL_DATA_DIR:/data" \
             ghcr.io/pascalorg/pascal-editor:latest
 
-          echo "Container started."
+          echo "Waiting for Pascal Editor..."
 
           READY=false
 
@@ -236,10 +204,9 @@ jobs:
             if ! docker inspect pascal-editor \
               --format '{{.State.Running}}' | grep -q true; then
 
-              echo "Pascal container stopped."
-
               docker logs --tail 120 pascal-editor || true
 
+              echo "Pascal container stopped."
               exit 1
             fi
 
@@ -247,10 +214,10 @@ jobs:
               curl -sS \
                 --connect-timeout 3 \
                 --max-time 10 \
-                -o /tmp/pascal-health.json \
+                -o /tmp/pascal-health.txt \
                 -w "%{http_code}" \
                 http://127.0.0.1:3000/api/health \
-                || true
+                2>/dev/null || true
             )
 
             if [[ "$STATUS" == "200" ]]; then
@@ -258,26 +225,22 @@ jobs:
               break
             fi
 
-            echo "Waiting for Pascal Editor: HTTP $STATUS"
-
+            echo "Editor health: HTTP $STATUS"
             sleep 3
           done
 
           if [[ "$READY" != "true" ]]; then
-            echo "Pascal Editor health check failed."
-
             docker logs --tail 150 pascal-editor || true
-
             exit 1
           fi
 
           echo "PASCAL_EDITOR_STATUS=SUCCESS" >> "$GITHUB_ENV"
 
-          echo "PASCAL EDITOR: READY"
+          echo "PASCAL EDITOR READY"
 
-      # ==============================================
-      # 7. Start official standalone Pascal MCP
-      # ==============================================
+      # ==========================================
+      # 5. Start official MCP
+      # ==========================================
 
       - name: Start Pascal MCP HTTP server
         shell: bash
@@ -287,19 +250,26 @@ jobs:
           set -Eeuo pipefail
 
           MCP_LOG="${RUNNER_TEMP}/pascal-mcp.log"
+          MCP_ERROR="${RUNNER_TEMP}/pascal-mcp-error.log"
 
-          echo "Starting official Pascal MCP package..."
+          echo "Starting Pascal MCP..."
+
+          # Important:
+          # --cors-origin is the official origin allowlist option.
+          # The previous PASCAL_MCP_HTTP_ORIGINS variable was not
+          # the documented configuration for this server.
 
           nohup env \
-            PASCAL_DATA_DIR="$PASCAL_DATA_DIR" \
-            PASCAL_MCP_HTTP_TOKEN="$PASCAL_MCP_HTTP_TOKEN" \
-            PASCAL_MCP_HTTP_ORIGINS="https://chatgpt.com,https://chat.openai.com" \
+            "PASCAL_DATA_DIR=$PASCAL_DATA_DIR" \
+            "PASCAL_MCP_HTTP_TOKEN=$PASCAL_MCP_HTTP_TOKEN" \
             npm exec --yes --package=@pascal-app/mcp -- \
               pascal-mcp \
               --http \
               --host 0.0.0.0 \
               --port 8787 \
-            > "$MCP_LOG" 2>&1 < /dev/null &
+              --cors-origin https://chatgpt.com \
+              --cors-origin https://chat.openai.com \
+            > "$MCP_LOG" 2>"$MCP_ERROR" < /dev/null &
 
           MCP_PID=$!
 
@@ -310,20 +280,23 @@ jobs:
           for i in $(seq 1 60); do
 
             if ! kill -0 "$MCP_PID" 2>/dev/null; then
-              echo "MCP process stopped."
+              echo "MCP process exited."
 
               tail -n 150 "$MCP_LOG" || true
+              tail -n 150 "$MCP_ERROR" || true
 
               exit 1
             fi
 
             STATUS=$(
               curl -sS \
+                --connect-timeout 3 \
+                --max-time 10 \
                 -o /dev/null \
                 -w "%{http_code}" \
                 -H "Authorization: Bearer $PASCAL_MCP_HTTP_TOKEN" \
                 http://127.0.0.1:8787/mcp \
-                || true
+                2>/dev/null || true
             )
 
             if [[ "$STATUS" == "405" ]]; then
@@ -331,29 +304,26 @@ jobs:
               break
             fi
 
-            echo "Waiting for MCP HTTP listener: $STATUS"
-
+            echo "Waiting for MCP listener: HTTP $STATUS"
             sleep 2
           done
 
           if [[ "$READY" != "true" ]]; then
-            echo "MCP did not become ready."
-
             tail -n 150 "$MCP_LOG" || true
+            tail -n 150 "$MCP_ERROR" || true
 
             exit 1
           fi
 
           echo "PASCAL_MCP_STATUS=READY" >> "$GITHUB_ENV"
 
-          echo "PASCAL MCP HTTP LISTENER: READY"
+          echo "MCP HTTP LISTENER READY"
 
-      # ==============================================
-      # 8. Initialize and test MCP sessions
-      # ==============================================
+      # ==========================================
+      # 6. Verify local and public MCP
+      # ==========================================
 
-      - name: Verify local and public MCP
-        id: verify
+      - name: Test MCP initialize and tools list
         shell: bash
         env:
           PASCAL_MCP_HTTP_TOKEN: ${{ secrets.PASCAL_MCP_HTTP_TOKEN }}
@@ -361,9 +331,8 @@ jobs:
           set -Eeuo pipefail
 
           REQUEST="${RUNNER_TEMP}/mcp-request.json"
-          INIT_BODY="${RUNNER_TEMP}/mcp-init-response.txt"
-          INIT_HEADERS="${RUNNER_TEMP}/mcp-init-headers.txt"
-          TOOLS_BODY="${RUNNER_TEMP}/mcp-tools-response.txt"
+          RESPONSE="${RUNNER_TEMP}/mcp-response.txt"
+          HEADERS="${RUNNER_TEMP}/mcp-headers.txt"
           CURL_ERROR="${RUNNER_TEMP}/mcp-curl-error.txt"
 
           cat > "$REQUEST" <<'JSON'
@@ -375,7 +344,7 @@ jobs:
               "protocolVersion": "2025-03-26",
               "capabilities": {},
               "clientInfo": {
-                "name": "github-actions-pascal-test",
+                "name": "github-actions-pascal",
                 "version": "1.0.0"
               }
             }
@@ -383,29 +352,32 @@ jobs:
           JSON
 
           mcp_test() {
-            local BASE_URL="$1"
+            local ENDPOINT="$1"
             local LABEL="$2"
-            local HTTP_STATUS=""
+
+            local STATUS=""
             local SESSION_ID=""
-            local NOTIFY_STATUS=""
             local TOOLS_STATUS=""
-            local SUCCESS=false
+            local INITIALIZED_STATUS=""
 
             echo ""
             echo "=========================================="
-            echo "Testing $LABEL MCP"
+            echo "TESTING $LABEL"
+            echo "ENDPOINT: $ENDPOINT"
             echo "=========================================="
 
-            for attempt in $(seq 1 25); do
+            local INITIALIZED=false
 
-              HTTP_STATUS=$(
+            for attempt in $(seq 1 20); do
+
+              STATUS=$(
                 curl -sS \
                   --connect-timeout 10 \
                   --max-time 40 \
-                  -D "$INIT_HEADERS" \
-                  -o "$INIT_BODY" \
+                  -D "$HEADERS" \
+                  -o "$RESPONSE" \
                   -w "%{http_code}" \
-                  -X POST "${BASE_URL}/mcp" \
+                  -X POST "$ENDPOINT" \
                   -H "Authorization: Bearer $PASCAL_MCP_HTTP_TOKEN" \
                   -H "Origin: https://chatgpt.com" \
                   -H "Accept: application/json, text/event-stream" \
@@ -414,37 +386,24 @@ jobs:
                   2>"$CURL_ERROR" || true
               )
 
-              echo "$LABEL initialize attempt $attempt: HTTP $HTTP_STATUS"
+              echo "$LABEL initialize: HTTP $STATUS"
 
-              if [[ "$HTTP_STATUS" == "200" ]]; then
-
-                SESSION_ID=$(
-                  awk 'tolower($1) == "mcp-session-id:" {
-                    gsub("\r", "", $2);
-                    print $2
-                  }' "$INIT_HEADERS" | tail -n 1
-                )
-
-                if [[ -n "$SESSION_ID" ]]; then
-                  SUCCESS=true
-                  break
-                fi
-
-                echo "HTTP 200 but session ID is missing."
+              if [[ "$STATUS" == "200" ]]; then
+                INITIALIZED=true
+                break
               fi
 
-              sleep 4
+              sleep 3
             done
 
-            if [[ "$SUCCESS" != "true" ]]; then
+            if [[ "$INITIALIZED" != "true" ]]; then
+              echo "$LABEL INITIALIZE FAILED"
 
-              echo "$LABEL MCP initialize failed."
+              echo "Response headers:"
+              cat "$HEADERS" || true
 
-              echo "HTTP headers:"
-              cat "$INIT_HEADERS" || true
-
-              echo "HTTP body:"
-              cat "$INIT_BODY" || true
+              echo "Response body:"
+              cat "$RESPONSE" || true
 
               echo "Curl error:"
               cat "$CURL_ERROR" || true
@@ -452,109 +411,162 @@ jobs:
               return 1
             fi
 
-            echo "$LABEL session initialized."
+            SESSION_ID=$(
+              awk 'tolower($1) == "mcp-session-id:" {
+                gsub("\r", "", $2);
+                print $2
+              }' "$HEADERS" | tail -n 1
+            )
 
-            # Send initialized notification.
+            echo "$LABEL initialize succeeded."
 
-            NOTIFY_STATUS=$(
+            # Build session header only when server provides one.
+            SESSION_ARGS=()
+
+            if [[ -n "$SESSION_ID" ]]; then
+              SESSION_ARGS+=(-H "Mcp-Session-Id: $SESSION_ID")
+              echo "$LABEL session ID received."
+            else
+              echo "$LABEL server did not issue a session ID."
+            fi
+
+            INITIALIZED_STATUS=$(
               curl -sS \
                 --connect-timeout 10 \
                 --max-time 30 \
                 -o /dev/null \
                 -w "%{http_code}" \
-                -X POST "${BASE_URL}/mcp" \
+                -X POST "$ENDPOINT" \
                 -H "Authorization: Bearer $PASCAL_MCP_HTTP_TOKEN" \
                 -H "Origin: https://chatgpt.com" \
-                -H "Mcp-Session-Id: $SESSION_ID" \
                 -H "MCP-Protocol-Version: 2025-03-26" \
                 -H "Accept: application/json, text/event-stream" \
                 -H "Content-Type: application/json" \
+                "${SESSION_ARGS[@]}" \
                 --data '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
                 || true
             )
 
-            echo "$LABEL initialized notification: HTTP $NOTIFY_STATUS"
-
-            # Request tool catalog.
+            echo "$LABEL initialized notification: HTTP $INITIALIZED_STATUS"
 
             TOOLS_STATUS=$(
               curl -sS \
                 --connect-timeout 10 \
                 --max-time 40 \
-                -o "$TOOLS_BODY" \
+                -o "$RESPONSE" \
                 -w "%{http_code}" \
-                -X POST "${BASE_URL}/mcp" \
+                -X POST "$ENDPOINT" \
                 -H "Authorization: Bearer $PASCAL_MCP_HTTP_TOKEN" \
                 -H "Origin: https://chatgpt.com" \
-                -H "Mcp-Session-Id: $SESSION_ID" \
                 -H "MCP-Protocol-Version: 2025-03-26" \
                 -H "Accept: application/json, text/event-stream" \
                 -H "Content-Type: application/json" \
+                "${SESSION_ARGS[@]}" \
                 --data '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
                 || true
             )
 
             echo "$LABEL tools/list: HTTP $TOOLS_STATUS"
 
-            if [[ "$TOOLS_STATUS" != "200" ]] || ! grep -q '"tools"' "$TOOLS_BODY"; then
-
-              echo "$LABEL tools/list failed."
-
-              cat "$TOOLS_BODY" || true
-
+            if [[ "$TOOLS_STATUS" != "200" ]] || ! grep -q '"tools"' "$RESPONSE"; then
+              echo "tools/list response:"
+              cat "$RESPONSE" || true
               return 1
             fi
 
             echo ""
-            echo "$LABEL MCP TOOLS:"
+            echo "$LABEL AVAILABLE TOOLS:"
+
             grep -Eo '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
-              "$TOOLS_BODY" | head -n 50 || true
+              "$RESPONSE" | head -n 60 || true
 
             echo ""
-            echo "$LABEL MCP: SUCCESS"
+            echo "$LABEL MCP SUCCESS"
 
             return 0
           }
 
           set +e
 
-          mcp_test "http://127.0.0.1:8787" "LOCAL"
+          # Local endpoint: full endpoint URL, no duplicate path.
+          mcp_test "http://127.0.0.1:8787/mcp" "LOCAL"
           LOCAL_RESULT=$?
 
-          mcp_test "$PASCAL_MCP_URL%/mcp" "PUBLIC"
+          # Public URL already ends with /mcp.
+          # Do not append another /mcp here.
+          mcp_test "$PASCAL_MCP_URL" "PUBLIC"
           PUBLIC_RESULT=$?
 
           set -e
 
           if [[ "$LOCAL_RESULT" -eq 0 ]]; then
             echo "PASCAL_LOCAL_VERIFY=SUCCESS" >> "$GITHUB_ENV"
-            echo "local=SUCCESS" >> "$GITHUB_OUTPUT"
           else
             echo "PASCAL_LOCAL_VERIFY=FAILED" >> "$GITHUB_ENV"
-            echo "local=FAILED" >> "$GITHUB_OUTPUT"
           fi
 
           if [[ "$PUBLIC_RESULT" -eq 0 ]]; then
             echo "PASCAL_PUBLIC_VERIFY=SUCCESS" >> "$GITHUB_ENV"
-            echo "public=SUCCESS" >> "$GITHUB_OUTPUT"
           else
             echo "PASCAL_PUBLIC_VERIFY=FAILED" >> "$GITHUB_ENV"
-            echo "public=FAILED" >> "$GITHUB_OUTPUT"
           fi
 
           echo ""
           echo "=========================================="
-          echo "LOCAL MCP RESULT: $LOCAL_RESULT"
-          echo "PUBLIC MCP RESULT: $PUBLIC_RESULT"
+          echo "LOCAL RESULT: $LOCAL_RESULT"
+          echo "PUBLIC RESULT: $PUBLIC_RESULT"
           echo "=========================================="
 
-          echo "Editor and MCP diagnostics completed."
+          if [[ "$LOCAL_RESULT" -ne 0 ]]; then
+            echo "Local MCP failed. Check Origin, token and MCP logs."
+          fi
 
-      # ==============================================
-      # 9. Publish connection links
-      # ==============================================
+          if [[ "$PUBLIC_RESULT" -ne 0 ]]; then
+            echo "Public MCP failed. Check Cloudflare and MCP logs."
+          fi
 
-      - name: Publish connection details
+      # ==========================================
+      # 7. Final diagnostics
+      # ==========================================
+
+      - name: Print diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "PASCAL STATUS"
+          echo "=========================================="
+
+          echo "Editor: ${PASCAL_EDITOR_STATUS:-UNKNOWN}"
+          echo "MCP: ${PASCAL_MCP_STATUS:-UNKNOWN}"
+          echo "Local test: ${PASCAL_LOCAL_VERIFY:-UNKNOWN}"
+          echo "Public test: ${PASCAL_PUBLIC_VERIFY:-UNKNOWN}"
+
+          echo ""
+          echo "Editor URL:"
+          echo "${PASCAL_EDITOR_URL:-NOT_CREATED}"
+
+          echo ""
+          echo "MCP URL:"
+          echo "${PASCAL_MCP_URL:-NOT_CREATED}"
+
+          echo ""
+          echo "MCP SERVER LOG:"
+          tail -n 100 "${RUNNER_TEMP}/pascal-mcp.log" 2>/dev/null || true
+
+          echo ""
+          echo "MCP ERROR LOG:"
+          tail -n 100 "${RUNNER_TEMP}/pascal-mcp-error.log" 2>/dev/null || true
+
+          echo ""
+          echo "CLOUDFLARE MCP LOG:"
+          tail -n 80 "${RUNNER_TEMP}/cloudflare-mcp.log" 2>/dev/null || true
+
+      # ==========================================
+      # 8. GitHub Summary
+      # ==========================================
+
+      - name: Publish connection links
         if: always()
         shell: bash
         run: |
@@ -563,51 +575,35 @@ jobs:
             echo ""
             echo "## Editor"
             echo ""
-            echo "$PASCAL_EDITOR_URL"
+            echo "${PASCAL_EDITOR_URL:-NOT_CREATED}"
             echo ""
-            echo "## MCP Endpoint"
+            echo "## MCP endpoint"
             echo ""
-            echo "$PASCAL_MCP_URL"
+            echo "${PASCAL_MCP_URL:-NOT_CREATED}"
             echo ""
-            echo "## Status"
+            echo "## Verification"
             echo ""
             echo "- Editor: ${PASCAL_EDITOR_STATUS:-UNKNOWN}"
-            echo "- Local MCP: ${PASCAL_LOCAL_VERIFY:-UNKNOWN}"
-            echo "- Public MCP: ${PASCAL_PUBLIC_VERIFY:-UNKNOWN}"
+            echo "- MCP: ${PASCAL_MCP_STATUS:-UNKNOWN}"
+            echo "- Local: ${PASCAL_LOCAL_VERIFY:-UNKNOWN}"
+            echo "- Public: ${PASCAL_PUBLIC_VERIFY:-UNKNOWN}"
             echo ""
             echo "## Authentication"
             echo ""
-            echo "- Editor: GitHub Secret \`PASCAL_ADMIN_PASSWORD\`"
-            echo "- MCP: Bearer token from \`PASCAL_MCP_HTTP_TOKEN\`"
-            echo ""
-            echo "Do not share either secret."
+            echo "- Editor: PASCAL_ADMIN_PASSWORD"
+            echo "- MCP: Bearer token PASCAL_MCP_HTTP_TOKEN"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo ""
-          echo "=========================================="
-          echo "PASCAL EDITOR:"
-          echo "${PASCAL_EDITOR_URL:-NOT_CREATED}"
-          echo ""
-          echo "PASCAL MCP:"
-          echo "${PASCAL_MCP_URL:-NOT_CREATED}"
-          echo ""
-          echo "LOCAL MCP:"
-          echo "${PASCAL_LOCAL_VERIFY:-UNKNOWN}"
-          echo ""
-          echo "PUBLIC MCP:"
-          echo "${PASCAL_PUBLIC_VERIFY:-UNKNOWN}"
-          echo "=========================================="
-
-      # ==============================================
-      # 10. Keep all services alive
-      # ==============================================
+      # ==========================================
+      # 9. Keep services alive
+      # ==========================================
 
       - name: Keep Pascal and tunnels alive
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          echo "Pascal Editor and MCP are running."
+          echo "Pascal services are running."
 
           while true; do
 
@@ -618,9 +614,7 @@ jobs:
               --format '{{.State.Running}}' | grep -q true; then
 
               echo "Pascal Editor container stopped."
-
               docker logs --tail 100 pascal-editor || true
-
               exit 1
             fi
 
@@ -636,11 +630,9 @@ jobs:
 
             done
 
-            echo "Editor container: RUNNING"
-            echo "Editor tunnel: RUNNING"
-            echo "MCP tunnel: RUNNING"
-            echo "MCP process: RUNNING"
+            echo "Editor: RUNNING"
+            echo "MCP: RUNNING"
+            echo "Cloudflare tunnels: RUNNING"
 
             sleep 30
-
           done
