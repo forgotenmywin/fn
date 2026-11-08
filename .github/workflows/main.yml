@@ -69,14 +69,20 @@ jobs:
           npm ls @pascal-app/core @pascal-app/mcp
           test -x node_modules/.bin/pascal-mcp
 
-      - name: Install Cloudflare Tunnel
+      - name: Install Cloudflare Tunnel (Docker image, no GitHub release download)
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 4 --retry-delay 2 \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -o "$RUNNER_TEMP/cloudflared"
-          sudo install -m 0755 "$RUNNER_TEMP/cloudflared" /usr/local/bin/cloudflared
+          # Avoid the GitHub Releases binary URL that returned HTTP 504.
+          # Run the official Cloudflare image with host networking so its
+          # 127.0.0.1 upstreams resolve to services on the Actions runner.
+          docker pull cloudflare/cloudflared:latest
+          sudo tee /usr/local/bin/cloudflared >/dev/null <<'WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec docker run --rm --network host cloudflare/cloudflared:latest "$@"
+          WRAPPER
+          sudo chmod 0755 /usr/local/bin/cloudflared
           cloudflared --version
 
       - name: Start Pascal Editor tunnel and obtain its public URL
