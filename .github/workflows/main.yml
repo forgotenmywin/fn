@@ -1,1532 +1,313 @@
-name: Pascal 3D Snapshot Export Monitor
+name: Pascal Editor · Plugins, Browser Export and MCP
 
-on:
+'on':
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Official Pascal container release channel
+        required: true
+        type: choice
+        default: latest
+        options:
+          - latest
+          - beta
+      keep_running:
+        description: Keep Pascal and both public tunnels running until the job is cancelled or times out
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
-  packages: read
+  actions: write
 
 concurrency:
-  group: pascal-viewer-only-session
-  cancel-in-progress: true
+  group: pascal-editor-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  pascal-viewer:
-    name: Pascal headless MCP and read-only 3D viewer
-    runs-on: ubuntu-24.04
+  pascal-editor:
+    name: Start Pascal Editor, Plugins, Exporter and MCP
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
+    env:
+      PASCAL_ADMIN_PASSWORD: ${{ secrets.PASCAL_ADMIN_PASSWORD }}
+      PASCAL_SCENE_API_TOKEN: ${{ secrets.PASCAL_SCENE_API_TOKEN }}
+      PASCAL_MCP_HTTP_TOKEN: ${{ secrets.PASCAL_MCP_HTTP_TOKEN }}
+      PASCAL_IMAGE: ghcr.io/pascalorg/pascal-editor:${{ inputs.channel }}
+
     steps:
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Checkout workspace
+        uses: actions/checkout@v4
+
+      - name: Restore Pascal project database
+        uses: actions/cache/restore@v4
         with:
-          node-version: "22.23.4"
-          # npm cache is intentionally disabled: this generated workspace has no lockfile.
+          path: pascal-data
+          key: pascal-data-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            pascal-data-${{ github.ref_name }}-
+            pascal-data-
 
-      - name: Install Cloudflare Tunnel
+      - name: Prepare persistent data directory
         shell: bash
         run: |
           set -Eeuo pipefail
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb \
-            -o "$RUNNER_TEMP/cloudflared.deb"
-          sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
-          if ! command -v zip >/dev/null 2>&1; then
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq zip
-          fi
+          mkdir -p pascal-data
+          chmod 777 pascal-data
+
+      - name: Create Pascal credentials
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          [[ -n "${PASCAL_ADMIN_PASSWORD:-}" ]] || PASCAL_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+          [[ -n "${PASCAL_SCENE_API_TOKEN:-}" ]] || PASCAL_SCENE_API_TOKEN="$(openssl rand -hex 32)"
+          [[ -n "${PASCAL_MCP_HTTP_TOKEN:-}" ]] || PASCAL_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+
+          {
+            printf 'PASCAL_ADMIN_PASSWORD=%s\n' "$PASCAL_ADMIN_PASSWORD"
+            printf 'PASCAL_SCENE_API_TOKEN=%s\n' "$PASCAL_SCENE_API_TOKEN"
+            printf 'PASCAL_MCP_HTTP_TOKEN=%s\n' "$PASCAL_MCP_HTTP_TOKEN"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo '## Pascal Editor credentials'
+            echo
+            echo '**Editor admin password**'
+            echo '```text'
+            printf '%s\n' "$PASCAL_ADMIN_PASSWORD"
+            echo '```'
+            echo
+            echo '**MCP bearer token**'
+            echo '```text'
+            printf '%s\n' "$PASCAL_MCP_HTTP_TOKEN"
+            echo '```'
+            echo
+            echo 'Keep this workflow run private. Anyone who can read this job summary can read these credentials.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Cloudflare Quick Tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --fail --silent --show-error --location \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            --output /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
           cloudflared --version
-          zip -v >/dev/null
 
-      - name: Start Pascal GLB snapshot exporter, frozen 3D monitor, and MCP export tool
-        id: stack
+      - name: Install Bun for the official Pascal MCP server
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Start Pascal Editor Quick Tunnel
+        id: editor_tunnel
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          VERSION="1.0.6"
-          PROJECT_NAME="Pascal Building Project"
-          SCENE_FILE_NAME="Studio_Test.scene.json"
-          DATA_DIR="$RUNNER_TEMP/pascal-data"
-          APP_DIR="$RUNNER_TEMP/pascal-viewer-app"
-          mkdir -p "$DATA_DIR" "$APP_DIR/src"
-          chmod 700 "$DATA_DIR"
+          LOG_FILE="$RUNNER_TEMP/pascal-editor-tunnel.log"
+          PID_FILE="$RUNNER_TEMP/pascal-editor-tunnel.pid"
 
-          # Last verified Pascal scene (Studio Test, 13 nodes). This is a real SceneGraph
-          # exported from Pascal, not a screenshot or a generated placeholder. It is used
-          # only if the local MCP starts with an empty 3-node scaffold.
-          cat > "$APP_DIR/src/seed-scene.json" <<'SEEDJSON'
-          {"nodes":{"site_odjz29my7rar7fa1":{"object":"node","id":"site_odjz29my7rar7fa1","type":"site","parentId":null,"visible":true,"metadata":{},"polygon":{"type":"polygon","points":[[-15,-15],[15,-15],[15,15],[-15,15]]},"children":["building_1v90m3u8j3gljuj9"]},"building_1v90m3u8j3gljuj9":{"object":"node","id":"building_1v90m3u8j3gljuj9","type":"building","parentId":"site_odjz29my7rar7fa1","visible":true,"metadata":{},"children":["level_52lh8wd8k1qi8rki"],"position":[0,0,0],"rotation":[0,0,0]},"level_52lh8wd8k1qi8rki":{"object":"node","id":"level_52lh8wd8k1qi8rki","type":"level","parentId":"building_1v90m3u8j3gljuj9","visible":true,"metadata":{},"children":["wall_mipwpw32vccydci6","wall_ibru9etld97piha9","wall_regrtdi389qmc388","wall_k0wlbxwi1e5jbuie","zone_vfk52c5ti6u20a8e","ceiling_am6mowoee4gzfmun","slab_00014pkp85xywjne"],"level":0,"baseElevation":0,"height":2.5},"wall_mipwpw32vccydci6":{"object":"node","id":"wall_mipwpw32vccydci6","type":"wall","name":"Wall 1","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":["door_f2uqc2jplcrs5c4i"],"thickness":0.2,"height":2.5,"start":[-4,-3],"end":[4,-3],"frontSide":"interior","backSide":"exterior"},"wall_ibru9etld97piha9":{"object":"node","id":"wall_ibru9etld97piha9","type":"wall","name":"Wall 2","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":[],"thickness":0.2,"height":2.5,"start":[4,-3],"end":[4,3],"frontSide":"interior","backSide":"exterior"},"wall_regrtdi389qmc388":{"object":"node","id":"wall_regrtdi389qmc388","type":"wall","name":"Wall 3","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":["window_qpvdeiumyt2kexu5"],"thickness":0.2,"height":2.5,"start":[4,3],"end":[-4,3],"frontSide":"interior","backSide":"exterior"},"wall_k0wlbxwi1e5jbuie":{"object":"node","id":"wall_k0wlbxwi1e5jbuie","type":"wall","name":"Wall 4","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":["window_crcr90bnp3jrb5k6"],"thickness":0.2,"height":2.5,"start":[-4,3],"end":[-4,-3],"frontSide":"interior","backSide":"exterior"},"zone_vfk52c5ti6u20a8e":{"object":"node","id":"zone_vfk52c5ti6u20a8e","type":"zone","name":"Studio Test","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"polygon":[[-4,-3],[4,-3],[4,3],[-4,3]],"holes":[],"autoFromWalls":true,"boundaryWallIds":["wall_ibru9etld97piha9","wall_k0wlbxwi1e5jbuie","wall_mipwpw32vccydci6","wall_regrtdi389qmc388"],"boundarySeparatorIds":[],"seed":[0,0],"spaceRole":"room","roomNumber":"","enclosureStatus":"enclosed","floorFinish":"","wallFinish":"","ceilingFinish":"","ceilingHeight":2.7,"occupancy":"","clearDimensionPolicy":"none","color":"#f59e0b"},"door_f2uqc2jplcrs5c4i":{"object":"node","id":"door_f2uqc2jplcrs5c4i","type":"door","name":"Door 1","parentId":"wall_mipwpw32vccydci6","visible":true,"metadata":{},"position":[4,1.05,0],"rotation":[0,3.141592653589793,0],"side":"back","floorThresholdVersion":1,"wallId":"wall_mipwpw32vccydci6","width":0.95,"height":2.1,"constructionType":"framed","dimensionReference":"nominal","doorCategory":"interior","doorType":"hinged","leafCount":1,"operationState":0,"slideDirection":"left","trackStyle":"none","garagePanelCount":4,"openingKind":"door","openingShape":"rectangle","openingRadiusMode":"all","openingTopRadii":[0.15,0.15],"cornerRadius":0.15,"archHeight":0.45,"openingRevealRadius":0.025,"frameThickness":0.05,"frameDepth":0.07,"threshold":true,"thresholdHeight":0.02,"hingesSide":"left","swingDirection":"inward","swingAngle":0,"segments":[{"type":"panel","heightRatio":1,"columnRatios":[1],"dividerThickness":0.03,"panelDepth":0,"panelInset":0}],"handle":true,"handleHeight":1.05,"handleSide":"right","contentPadding":[0,0],"doorCloser":false,"panicBar":false,"panicBarHeight":1},"window_qpvdeiumyt2kexu5":{"object":"node","id":"window_qpvdeiumyt2kexu5","type":"window","name":"Window 1","parentId":"wall_regrtdi389qmc388","visible":true,"metadata":{},"position":[4,1.5,0],"rotation":[0,0,0],"floorThresholdVersion":1,"wallId":"wall_regrtdi389qmc388","width":1.8,"height":1.2,"constructionType":"framed","dimensionReference":"nominal","openingKind":"window","windowType":"fixed","operationState":0,"awningDirection":"up","casementStyle":"single","hingesSide":"left","openingShape":"rectangle","openingRadiusMode":"all","openingCornerRadii":[0.15,0.15,0.15,0.15],"cornerRadius":0.15,"archHeight":0.35,"openingRevealRadius":0.025,"frameThickness":0.05,"frameDepth":0.07,"columnRatios":[1],"rowRatios":[1],"columnDividerThickness":0.03,"rowDividerThickness":0.03,"sill":true,"sillDepth":0.08,"sillThickness":0.03},"window_crcr90bnp3jrb5k6":{"object":"node","id":"window_crcr90bnp3jrb5k6","type":"window","name":"Window 2","parentId":"wall_k0wlbxwi1e5jbuie","visible":true,"metadata":{},"position":[3,1.5,0],"rotation":[0,0,0],"floorThresholdVersion":1,"wallId":"wall_k0wlbxwi1e5jbuie","width":1.5,"height":1.2,"constructionType":"framed","dimensionReference":"nominal","openingKind":"window","windowType":"fixed","operationState":0,"awningDirection":"up","casementStyle":"single","hingesSide":"left","openingShape":"rectangle","openingRadiusMode":"all","openingCornerRadii":[0.15,0.15,0.15,0.15],"cornerRadius":0.15,"archHeight":0.35,"openingRevealRadius":0.025,"frameThickness":0.05,"frameDepth":0.07,"columnRatios":[1],"rowRatios":[1],"columnDividerThickness":0.03,"rowDividerThickness":0.03,"sill":true,"sillDepth":0.08,"sillThickness":0.03},"ceiling_am6mowoee4gzfmun":{"object":"node","id":"ceiling_am6mowoee4gzfmun","type":"ceiling","name":"Studio Test Ceiling","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"children":[],"polygon":[[-4,-3],[4,-3],[4,3],[-4,3]],"holes":[],"holeMetadata":[],"boundary":"auto","zoneId":"zone_vfk52c5ti6u20a8e","autoFromWalls":true},"slab_00014pkp85xywjne":{"object":"node","id":"slab_00014pkp85xywjne","type":"slab","name":"Floor plate","parentId":"level_52lh8wd8k1qi8rki","visible":true,"metadata":{},"polygon":[[-4.1,-3.1],[4.1,-3.1],[4.1,3.1],[-4.1,3.1]],"holes":[],"holeMetadata":[],"elevation":0.05,"foundation":{"type":"none"},"thickness":0.05,"recessed":false,"boundary":"auto","plateRole":"base","zoneIds":["zone_vfk52c5ti6u20a8e"],"autoFromWalls":true}},"rootNodeIds":["site_odjz29my7rar7fa1"],"collections":{},"materials":{}}
-          SEEDJSON
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:3000 \
+            --no-autoupdate \
+            --loglevel info \
+            > "$LOG_FILE" 2>&1 < /dev/null &
+          echo "$!" > "$PID_FILE"
 
-          echo "Pascal version: $VERSION"
-          echo "Project label: $PROJECT_NAME"
-          echo "Scene filename: $SCENE_FILE_NAME"
-          echo "Shared scene database: $DATA_DIR"
+          PUBLIC_URL=''
+          for attempt in $(seq 1 90); do
+            PUBLIC_URL="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_FILE" | head -n 1 || true)"
+            [[ -n "$PUBLIC_URL" ]] && break
+            if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+              cat "$LOG_FILE" || true
+              echo 'Pascal editor tunnel exited before publishing its URL.' >&2
+              exit 1
+            fi
+            sleep 2
+          done
 
-          # Install MCP and its required Core peer dependency side by side at the
-          # same exact release. npm exec alone may resolve a different peer copy.
-          MCP_DIR="$RUNNER_TEMP/pascal-mcp-runtime"
-          mkdir -p "$MCP_DIR"
-          npm install \
-            --prefix "$MCP_DIR" \
-            --no-audit \
-            --no-fund \
-            --save-exact \
-            "@pascal-app/core@${VERSION}" \
-            "@pascal-app/mcp@${VERSION}"
+          [[ -n "$PUBLIC_URL" ]] || { cat "$LOG_FILE" || true; echo 'Could not obtain the Pascal editor tunnel URL.' >&2; exit 1; }
 
-          echo "Installed Pascal MCP/Core dependency tree:"
-          npm ls --prefix "$MCP_DIR" --depth=0
-          npm ls --prefix "$MCP_DIR" "@pascal-app/mcp" "@pascal-app/core"
+          echo "public_url=$PUBLIC_URL" >> "$GITHUB_OUTPUT"
+          echo "PASCAL_PUBLIC_URL=$PUBLIC_URL" >> "$GITHUB_ENV"
 
-          # Fail immediately with a clear diagnostic if the exact Core package
-          # still lacks the named export that MCP imports at startup.
-          (
-            cd "$MCP_DIR"
-            node --input-type=module <<'NODE'
-          import { assetViewsReadCatalog } from '@pascal-app/core/agent-operations';
-          if (typeof assetViewsReadCatalog === 'undefined') {
-            throw new Error('Core 1.0.6 is missing assetViewsReadCatalog');
-          }
-          console.log('PASCAL_CORE_AGENT_OPERATIONS_EXPORT=PASS');
-          NODE
-          )
+      - name: Start Pascal MCP Quick Tunnel
+        id: mcp_tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
-          # MCP is headless. The official Viewer package below is the only UI exposed to the user.
-          (
-            export PASCAL_DATA_DIR="$DATA_DIR"
-            export PASCAL_DB_PATH="$DATA_DIR/pascal.db"
-            cd "$MCP_DIR"
-            exec "$MCP_DIR/node_modules/.bin/pascal-mcp" \
-              --http --host 127.0.0.1 --port 8787 \
-              --cors-origin https://chatgpt.com \
-              --cors-origin https://chat.openai.com
-          ) > "$RUNNER_TEMP/pascal-mcp.log" 2>&1 < /dev/null &
-          echo $! > "$RUNNER_TEMP/pascal-mcp.pid"
+          LOG_FILE="$RUNNER_TEMP/pascal-mcp-tunnel.log"
+          PID_FILE="$RUNNER_TEMP/pascal-mcp-tunnel.pid"
 
-          echo "Waiting for Pascal MCP listener..."
-          MCP_READY=0
-          for _ in $(seq 1 90); do
-            if ss -ltn | grep -qE '127\.0\.0\.1:8787|\[::1\]:8787'; then
-              MCP_READY=1
+          nohup cloudflared tunnel \
+            --url http://127.0.0.1:8787 \
+            --no-autoupdate \
+            --loglevel info \
+            > "$LOG_FILE" 2>&1 < /dev/null &
+          echo "$!" > "$PID_FILE"
+
+          PUBLIC_URL=''
+          for attempt in $(seq 1 90); do
+            PUBLIC_URL="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG_FILE" | head -n 1 || true)"
+            [[ -n "$PUBLIC_URL" ]] && break
+            if ! kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+              cat "$LOG_FILE" || true
+              echo 'Pascal MCP tunnel exited before publishing its URL.' >&2
+              exit 1
+            fi
+            sleep 2
+          done
+
+          [[ -n "$PUBLIC_URL" ]] || { cat "$LOG_FILE" || true; echo 'Could not obtain the Pascal MCP tunnel URL.' >&2; exit 1; }
+
+          echo "public_url=$PUBLIC_URL" >> "$GITHUB_OUTPUT"
+          echo "PASCAL_MCP_PUBLIC_URL=$PUBLIC_URL/mcp" >> "$GITHUB_ENV"
+
+      - name: Pull official Pascal Editor image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker pull "$PASCAL_IMAGE"
+
+      - name: Start Pascal Editor with persistent scene storage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          docker rm -f pascal-editor >/dev/null 2>&1 || true
+          docker run --detach \
+            --name pascal-editor \
+            --restart unless-stopped \
+            --publish 127.0.0.1:3000:3000 \
+            --env PASCAL_ADMIN_PASSWORD \
+            --env PASCAL_SCENE_API_TOKEN \
+            --env PASCAL_PUBLIC_URL \
+            --volume "$GITHUB_WORKSPACE/pascal-data:/data" \
+            "$PASCAL_IMAGE"
+
+      - name: Wait for Pascal Editor readiness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          READY=0
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:3000/ >/dev/null 2>&1; then
+              READY=1
+              break
+            fi
+            if [[ "$(docker inspect -f '{{.State.Running}}' pascal-editor 2>/dev/null || echo false)" != 'true' ]]; then
+              docker logs --tail 200 pascal-editor || true
+              echo 'Pascal container stopped during startup.' >&2
+              exit 1
+            fi
+            sleep 3
+          done
+
+          [[ "$READY" == '1' ]] || { docker logs --tail 200 pascal-editor || true; echo 'Pascal did not become ready within six minutes.' >&2; exit 1; }
+          echo 'PASCAL_EDITOR_READY=true'
+
+      - name: Start official Pascal MCP server against the same database
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          MCP_LOG="$RUNNER_TEMP/pascal-mcp.log"
+          MCP_PID_FILE="$RUNNER_TEMP/pascal-mcp.pid"
+
+          export PASCAL_DATA_DIR="$GITHUB_WORKSPACE/pascal-data"
+          export PASCAL_MCP_HTTP_TOKEN
+
+          nohup bunx --yes --package @pascal-app/mcp pascal-mcp \
+            --http \
+            --host 0.0.0.0 \
+            --port 8787 \
+            > "$MCP_LOG" 2>&1 < /dev/null &
+
+          echo "$!" > "$MCP_PID_FILE"
+
+          READY=0
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$(cat "$MCP_PID_FILE")" 2>/dev/null; then
+              cat "$MCP_LOG" || true
+              echo 'Pascal MCP process exited during startup.' >&2
+              exit 1
+            fi
+            if grep -Eqi '8787|listening|http server|ready' "$MCP_LOG"; then
+              READY=1
               break
             fi
             sleep 2
           done
-          if [[ "$MCP_READY" != "1" ]]; then
-            echo "Pascal MCP did not start. MCP log:" >&2
-            tail -n 180 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
-            exit 1
-          fi
-          echo "PASCAL_MCP_LISTENER=PASS"
 
-          # Verify a real MCP initialize, complete tool catalogue, and scene read.
-          node --input-type=module <<'NODE' | tee "$RUNNER_TEMP/mcp-probe.txt"
-          const base = 'http://127.0.0.1:8787';
-          const protocolVersion = '2025-06-18';
-          let sessionId;
-
-          function parseBody(raw) {
-            const data = raw.split(/\r?\n/).filter(line => line.startsWith('data:'))
-              .map(line => line.slice(5).trimStart()).join('\n');
-            if (data) return JSON.parse(data);
-            if (!raw.trim()) return null;
-            return JSON.parse(raw.trim());
-          }
-
-          async function post(path, body) {
-            const headers = {
-              'content-type': 'application/json',
-              'accept': 'application/json, text/event-stream',
-            };
-            if (sessionId) headers['mcp-session-id'] = sessionId;
-            if (body.method !== 'initialize') headers['mcp-protocol-version'] = protocolVersion;
-            const response = await fetch(`${base}${path}`, {
-              method: 'POST', headers, body: JSON.stringify(body),
-              signal: AbortSignal.timeout(25000),
-            });
-            const raw = await response.text();
-            let payload = null;
-            try { payload = parseBody(raw); } catch {
-              throw new Error(`Unparseable MCP response (${response.status}): ${raw.slice(0, 600)}`);
-            }
-            return { response, payload };
-          }
-
-          let connected = null;
-          let lastError = null;
-          for (const path of ['/mcp', '/mcp/']) {
-            try {
-              const init = await post(path, {
-                jsonrpc: '2.0', id: 1, method: 'initialize',
-                params: {
-                  protocolVersion,
-                  capabilities: {},
-                  clientInfo: { name: 'pascal-viewer-workflow', version: '1.0.0' },
-                },
-              });
-              if (init.response.status === 404 || init.response.status === 405) continue;
-              if (!init.response.ok || init.payload?.error) {
-                throw new Error(`initialize failed ${init.response.status}: ${JSON.stringify(init.payload)}`);
-              }
-              sessionId = init.response.headers.get('mcp-session-id') || undefined;
-              await post(path, { jsonrpc: '2.0', method: 'notifications/initialized' });
-              const listed = await post(path, {
-                jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
-              });
-              if (!listed.response.ok || listed.payload?.error) {
-                throw new Error(`tools/list failed: ${JSON.stringify(listed.payload)}`);
-              }
-              const tools = listed.payload?.result?.tools;
-              if (!Array.isArray(tools) || !tools.length) throw new Error('MCP returned an empty tool list.');
-              const names = new Set(tools.map(tool => tool.name));
-              const required = ['get_scene', 'list_scenes', 'save_scene', 'export_json', 'load_scene'];
-              const missing = required.filter(name => !names.has(name));
-              if (missing.length) throw new Error(`Required Pascal tools are missing: ${missing.join(', ')}`);
-              const scene = await post(path, {
-                jsonrpc: '2.0', id: 3, method: 'tools/call',
-                params: { name: 'get_scene', arguments: {} },
-              });
-              if (!scene.response.ok || scene.payload?.error || scene.payload?.result?.isError) {
-                throw new Error(`get_scene failed: ${JSON.stringify(scene.payload).slice(0, 900)}`);
-              }
-              connected = { path, tools };
-              break;
-            } catch (error) { lastError = error; }
-          }
-          if (!connected) throw new Error(`MCP handshake failed: ${lastError?.message || 'endpoint not found'}`);
-          console.log(`MCP_PATH=${connected.path}`);
-          console.log(`MCP_TOOLS_COUNT=${connected.tools.length}`);
-          console.log(`MCP_TOOLS=${connected.tools.map(tool => tool.name).join(',')}`);
-          console.log('MCP_GET_SCENE=PASS');
-          console.log('MCP_REQUIRED_TOOLS=PASS');
-          NODE
-
-          MCP_PATH="$(sed -n 's/^MCP_PATH=//p' "$RUNNER_TEMP/mcp-probe.txt" | tail -n 1)"
-          MCP_TOOLS_COUNT="$(sed -n 's/^MCP_TOOLS_COUNT=//p' "$RUNNER_TEMP/mcp-probe.txt" | tail -n 1)"
-          if [[ -z "$MCP_PATH" || -z "$MCP_TOOLS_COUNT" ]]; then
-            echo "MCP probe did not report a usable tool catalogue." >&2
-            tail -n 180 "$RUNNER_TEMP/pascal-mcp.log" >&2 || true
+          if [[ "$READY" != '1' ]]; then
+            cat "$MCP_LOG" || true
+            echo 'Pascal MCP did not report readiness.' >&2
             exit 1
           fi
 
-          get_tunnel_url() {
-            local logfile="$1"
-            local url=""
-            for _ in $(seq 1 60); do
-              url="$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$logfile" 2>/dev/null | tail -n 1 || true)"
-              if [[ -n "$url" ]]; then printf '%s' "$url"; return 0; fi
-              sleep 2
-            done
-            echo "Cloudflare did not issue a Quick Tunnel URL. Log: $logfile" >&2
-            tail -n 100 "$logfile" >&2 || true
-            return 1
-          }
+          echo 'PASCAL_MCP_PROCESS_READY=true'
 
-          # A frozen GLB monitor: no Pascal live renderer, scene polling, or screenshot capture.
-          cd "$APP_DIR"
-          npm init -y >/dev/null
-          npm install --no-audit --no-fund \
-            "react@^19" "react-dom@^19" \
-            "three@^0.186.1" \
-            "@react-three/fiber@^9.8.2" \
-            "@react-three/drei@^10.7.9" \
-            "vite@^7"
-
-          cat > index.html <<'HTML'
-          <!doctype html>
-          <html lang="fa" dir="rtl">
-            <head>
-              <meta charset="UTF-8" />
-              <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-              <meta name="color-scheme" content="dark" />
-              <title>Pascal 3D Snapshot Monitor</title>
-            </head>
-            <body>
-              <div id="root">
-                <main class="boot-screen">
-                  <div class="boot-card">
-                    <div class="boot-mark">P</div>
-                    <h1>Pascal 3D Viewer</h1>
-                    <p>در حال بارگذاری نمایشگر سه‌بعدی…</p>
-                    <small>در حال دریافت موتور نمایش و صحنهٔ ذخیره‌شده</small>
-                  </div>
-                </main>
-              </div>
-              <div id="fatal-runtime" role="alert" hidden></div>
-              <script>
-                window.__PASCAL_APP_MOUNTED = false;
-                (() => {
-                  const panel = document.getElementById('fatal-runtime');
-                  const show = (message) => {
-                    panel.hidden = false;
-                    panel.textContent = 'خطای راه‌اندازی نمایشگر: ' + String(message || 'خطای نامشخص') + ' | F12 → Console برای جزئیات';
-                  };
-                  window.addEventListener('error', (event) => {
-                    show(event.message || event.filename || 'بارگذاری JavaScript ناموفق بود');
-                  }, true);
-                  window.addEventListener('unhandledrejection', (event) => {
-                    show(event.reason?.stack || event.reason?.message || event.reason);
-                  });
-                  setTimeout(() => {
-                    if (!window.__PASCAL_APP_MOUNTED) show('React mount تا ۲۵ ثانیه کامل نشد؛ بسته‌های Viewer یا فایل‌های frontend را بررسی کنید.');
-                  }, 25000);
-                })();
-              </script>
-              <script type="module" src="/src/main.jsx"></script>
-            </body>
-          </html>
-          HTML
-
-          cat > src/main.jsx <<'JS'
-          // Bootstrap React before importing Pascal's viewer modules. Some Pascal
-          // package chunks still contain classic JSX output that reads the global React.
-          import React from 'react';
-          globalThis.React = React;
-          window.React = React;
-
-          try {
-            await import('./viewer-app.jsx');
-          } catch (error) {
-            console.error('Pascal Viewer module import failed:', error);
-            const panel = document.getElementById('fatal-runtime');
-            if (panel) {
-              panel.hidden = false;
-              panel.textContent = 'خطای بارگذاری ماژول نمایشگر: ' + (error?.stack || error?.message || String(error));
-            }
-          }
-          JS
-
-          cat > src/viewer-app.jsx <<'JS'
-          import React, { Suspense, useEffect, useMemo, useState } from 'react';
-          import { createRoot } from 'react-dom/client';
-          import { Canvas, useLoader } from '@react-three/fiber';
-          import { Bounds, Grid, OrbitControls } from '@react-three/drei';
-          import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-          import './style.css';
-
-          function ExportModel({ url }) {
-            const gltf = useLoader(GLTFLoader, url);
-            return (
-              <Bounds fit clip observe margin={1.25}>
-                <primitive object={gltf.scene} />
-              </Bounds>
-            );
-          }
-
-          function ModelCanvas({ url }) {
-            return (
-              <Canvas
-                camera={{ position: [12, 9, 12], fov: 43, near: 0.01, far: 500 }}
-                dpr={[1, 1.5]}
-                frameloop="demand"
-                gl={{ antialias: true, alpha: false, powerPreference: 'high-performance' }}
-              >
-                <color attach="background" args={['#0b111b']} />
-                <ambientLight intensity={0.75} />
-                <directionalLight position={[8, 14, 9]} intensity={2.0} />
-                <directionalLight position={[-8, 7, -6]} intensity={0.65} />
-                <Suspense fallback={null}>
-                  <ExportModel url={url} />
-                </Suspense>
-                <Grid
-                  position={[0, -0.035, 0]}
-                  infiniteGrid
-                  cellSize={0.5}
-                  sectionSize={2}
-                  cellThickness={0.45}
-                  sectionThickness={0.8}
-                  fadeDistance={45}
-                  fadeStrength={1}
-                />
-                <OrbitControls makeDefault enableDamping dampingFactor={0.08} />
-              </Canvas>
-            );
-          }
-
-          function App() {
-            const [exportInfo, setExportInfo] = useState(null);
-            const [error, setError] = useState('');
-            const [loading, setLoading] = useState(true);
-            const [backupBusy, setBackupBusy] = useState(false);
-            const [backupDone, setBackupDone] = useState(false);
-
-            const loadStatus = async () => {
-              const response = await fetch('/api/export-status', { cache: 'no-store' });
-              if (!response.ok) throw new Error(`Export status HTTP ${response.status}`);
-              const data = await response.json();
-              setExportInfo(data.export || null);
-              setError(data.error || '');
-            };
-
-            useEffect(() => {
-              let mounted = true;
-              const start = async () => {
-                try {
-                  await loadStatus();
-                } catch (cause) {
-                  if (mounted) setError(cause?.message || String(cause));
-                } finally {
-                  if (mounted) setLoading(false);
-                }
-              };
-              start();
-
-              // This stream carries only an explicit export-complete event. It does not watch
-              // scene edits, fetch models continuously, capture screenshots, or poll the MCP.
-              const stream = new EventSource('/api/export-events');
-              stream.addEventListener('exported', event => {
-                try {
-                  const data = JSON.parse(event.data);
-                  if (mounted) {
-                    setExportInfo(data);
-                    setError('');
-                  }
-                } catch (cause) {
-                  if (mounted) setError(`دادهٔ خروجی نامعتبر است: ${cause?.message || cause}`);
-                }
-              });
-              stream.addEventListener('status', event => {
-                try {
-                  const data = JSON.parse(event.data);
-                  if (data.error && mounted) setError(String(data.error));
-                } catch {}
-              });
-              stream.onerror = () => {
-                // A disconnect is not a model update. The current exported file remains visible.
-              };
-
-              return () => {
-                mounted = false;
-                stream.close();
-              };
-            }, []);
-
-            const modelUrl = useMemo(() => {
-              if (!exportInfo?.downloadUrl) return null;
-              const separator = exportInfo.downloadUrl.includes('?') ? '&' : '?';
-              return `${exportInfo.downloadUrl}${separator}v=${encodeURIComponent(exportInfo.exportId || exportInfo.createdAt || '1')}`;
-            }, [exportInfo]);
-
-            const downloadGlb = () => {
-              if (!exportInfo?.downloadUrl) return;
-              const anchor = document.createElement('a');
-              anchor.href = exportInfo.downloadUrl;
-              anchor.download = exportInfo.fileName || 'Pascal_3D_Export.glb';
-              document.body.appendChild(anchor);
-              anchor.click();
-              anchor.remove();
-            };
-
-            const downloadBackup = async () => {
-              if (backupBusy) return;
-              setBackupBusy(true);
-              setBackupDone(false);
-              setError('');
-              try {
-                const response = await fetch('/api/save', { method: 'POST' });
-                if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
-                const blob = await response.blob();
-                const objectUrl = URL.createObjectURL(blob);
-                const anchor = document.createElement('a');
-                anchor.href = objectUrl;
-                anchor.download = 'Pascal_Project_Backup.zip';
-                document.body.appendChild(anchor);
-                anchor.click();
-                anchor.remove();
-                setTimeout(() => URL.revokeObjectURL(objectUrl), 3000);
-                setBackupDone(true);
-                setTimeout(() => setBackupDone(false), 2500);
-              } catch (cause) {
-                setError(`ساخت پشتیبان ناموفق بود: ${cause?.message || cause}`);
-              } finally {
-                setBackupBusy(false);
-              }
-            };
-
-            return (
-              <main className="app-shell">
-                <header className="topbar">
-                  <div className="meta-block">
-                    <span className="meta-label">پروژه</span>
-                    <strong className="meta-value">{exportInfo?.projectName || 'Pascal Building Project'}</strong>
-                  </div>
-                  <div className="meta-block file-block">
-                    <span className="meta-label">آخرین فایل 3D Export</span>
-                    <strong className="meta-value" title={exportInfo?.fileName || ''}>
-                      {exportInfo?.fileName || 'هنوز خروجی سه‌بعدی ساخته نشده'}
-                    </strong>
-                  </div>
-                  <div className="meta-status">
-                    {exportInfo ? `${exportInfo.nodeCount} گره · ${exportInfo.sizeLabel || ''}` : 'در انتظار دستور 3D Export'}
-                  </div>
-                  <button className="action-button" onClick={downloadGlb} disabled={!exportInfo}>دریافت GLB</button>
-                  <button className="action-button secondary" onClick={downloadBackup} disabled={backupBusy}>
-                    {backupBusy ? 'در حال پشتیبان…' : backupDone ? 'پشتیبان ذخیره شد' : 'پشتیبان پروژه'}
-                  </button>
-                </header>
-
-                <section className="viewer-area">
-                  {loading ? (
-                    <div className="empty-state"><div className="spinner" /><h2>در حال بررسی آخرین خروجی سه‌بعدی…</h2></div>
-                  ) : modelUrl ? (
-                    <ModelCanvas key={modelUrl} url={modelUrl} />
-                  ) : (
-                    <div className="empty-state">
-                      <div className="empty-icon">3D</div>
-                      <h2>هنوز فایل سه‌بعدی وجود ندارد</h2>
-                      <p>وقتی دستور «3D Export» صادر شود، فایل GLB ذخیره و همین‌جا نمایش داده می‌شود.</p>
-                      <small>این نمایشگر صحنه را زنده همگام‌سازی نمی‌کند؛ فقط آخرین خروجی ذخیره‌شده را نشان می‌دهد.</small>
-                    </div>
-                  )}
-                  {exportInfo && (
-                    <div className="export-badge">
-                      <span className="status-dot" />
-                      خروجی ذخیره‌شده · {new Date(exportInfo.createdAt).toLocaleString('fa-IR')}
-                    </div>
-                  )}
-                  {error && <div className="error-message">{error}</div>}
-                </section>
-              </main>
-            );
-          }
-
-          createRoot(document.getElementById('root')).render(<App />);
-          JS
-
-          cat > src/style.css <<'CSS'
-          * { box-sizing: border-box; }
-          html, body, #root { margin: 0; width: 100%; height: 100%; min-height: 100%; overflow: hidden; }
-          body { background: #0b111b; color: #eef2f7; font-family: "Segoe UI", Tahoma, Arial, sans-serif; }
-          .app-shell { width: 100%; height: 100dvh; display: flex; flex-direction: column; background: #0b111b; }
-          .topbar { z-index: 5; flex: 0 0 auto; min-height: 72px; display: flex; align-items: center; gap: 18px; padding: 10px 18px; background: #111a27; border-bottom: 1px solid #28364a; }
-          .meta-block { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-          .file-block { flex: 1; }
-          .meta-label { color: #94a3b8; font-size: 11px; }
-          .meta-value { color: #f1f5f9; font-size: 14px; font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; direction: auto; }
-          .meta-status { color: #9fc3ec; font-size: 12px; white-space: nowrap; }
-          .action-button { flex: 0 0 auto; border: 1px solid #53657c; border-radius: 8px; padding: 10px 14px; background: #243c59; color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; }
-          .action-button.secondary { background: #202b39; }
-          .action-button:hover:not(:disabled) { filter: brightness(1.15); }
-          .action-button:disabled { opacity: .4; cursor: default; }
-          .viewer-area { position: relative; flex: 1 1 auto; min-height: 0; min-width: 0; overflow: hidden; background: #0b111b; }
-          .viewer-area canvas { display: block; width: 100% !important; height: 100% !important; }
-          .empty-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 28px; text-align: center; background: radial-gradient(ellipse at center, #18283d 0%, #0b111b 72%); color: #d9e5f4; }
-          .empty-state h2 { margin: 16px 0 8px; font-size: 20px; }
-          .empty-state p { max-width: 620px; margin: 0 0 10px; color: #b7c5d8; font-size: 14px; line-height: 1.9; }
-          .empty-state small { color: #8192aa; font-size: 12px; }
-          .empty-icon { width: 66px; height: 66px; border-radius: 18px; display: grid; place-items: center; background: #243449; color: white; font-size: 25px; font-weight: 800; letter-spacing: -1px; }
-          .spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid #34465d; border-top-color: #9fc3ec; animation: spin .9s linear infinite; }
-          @keyframes spin { to { transform: rotate(360deg); } }
-          .export-badge { position: absolute; top: 14px; right: 14px; z-index: 4; display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid #40546c; border-radius: 9px; background: rgba(17,26,39,.9); color: #d9e5f4; font-size: 11px; pointer-events: none; }
-          .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #62c894; box-shadow: 0 0 8px #62c89499; }
-          .error-message { position: absolute; right: 14px; bottom: 14px; z-index: 9; max-width: min(720px, calc(100% - 28px)); padding: 10px 13px; border: 1px solid #9d4848; border-radius: 8px; background: rgba(105,30,30,.95); color: #fff1f1; font-size: 12px; line-height: 1.7; }
-          @media (max-width: 820px) { .topbar { gap: 9px; padding: 8px; } .meta-value { max-width: 24vw; font-size: 11px; } .meta-status { display: none; } .action-button { padding: 9px 8px; font-size: 11px; } }
-          CSS
-
-          cat > package.json.tmp <<'JSON'
-          {"scripts":{"build":"vite build"},"type":"module"}
-          JSON
-          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));const q=JSON.parse(fs.readFileSync('package.json.tmp'));p.scripts=q.scripts;p.type=q.type;fs.writeFileSync('package.json',JSON.stringify(p,null,2));fs.unlinkSync('package.json.tmp')"
-          npx vite build
-
-          # MCP-backed state service. The browser can read the graph and request one safe save operation;
-          # it cannot call arbitrary MCP tools and has no project/editor controls.
-          cat > "$RUNNER_TEMP/pascal-viewer-server.mjs" <<'SERVER'
-          import http from 'node:http';
-          import fs from 'node:fs/promises';
-          import path from 'node:path';
-          import os from 'node:os';
-          import crypto from 'node:crypto';
-          import { createReadStream } from 'node:fs';
-          import { execFile } from 'node:child_process';
-          import { promisify } from 'node:util';
-
-          const execFileAsync = promisify(execFile);
-          const APP_DIR = process.env.APP_DIR;
-          const DATA_DIR = process.env.PASCAL_DATA_DIR;
-          const EXPORT_DIR = path.join(DATA_DIR, 'exports');
-          const SEED_GRAPH_PATH = path.join(APP_DIR, 'src', 'seed-scene.json');
-          const MCP_BASE = process.env.MCP_LOCAL_BASE || 'http://127.0.0.1:8787';
-          const MCP_PATH = process.env.MCP_PATH || '/mcp';
-          const PROJECT_NAME_DEFAULT = process.env.PASCAL_PROJECT_NAME || 'Pascal Building Project';
-          const FILE_NAME_DEFAULT = process.env.PASCAL_SCENE_FILE_NAME || 'Studio_Test.scene.json';
-          const PROTOCOL_VERSION = '2025-06-18';
-          let seedGraph = null;
-          let sessionId;
-          let requestId = 1;
-          let requestQueue = Promise.resolve();
-          let projectId = null;
-          let sceneId = null;
-          let loadedVersion = 0;
-          let selectedUpdatedAt = '';
-          let projectName = PROJECT_NAME_DEFAULT;
-          let fileName = FILE_NAME_DEFAULT;
-          let sceneName = path.basename(FILE_NAME_DEFAULT).replace(/\.scene\.json$/i, '').replace(/\.json$/i, '').replace(/[_-]+/g, ' ') || 'Studio Test';
-          let latestGraph = null;
-          let latestGraphHash = '';
-          let graphSource = 'not-exported';
-          let lastError = '';
-          let latestExport = null;
-          const exportClients = new Set();
-          const sseHeartbeat = setInterval(() => {
-            for (const response of exportClients) {
-              try { response.write(': keepalive\n\n'); }
-              catch { exportClients.delete(response); }
-            }
-          }, 25000);
-          sseHeartbeat.unref();
-
-          function parseMcpBody(raw) {
-            const dataLines = raw.split(/\r?\n/).filter(line => line.startsWith('data:'));
-            if (dataLines.length) return JSON.parse(dataLines.map(line => line.slice(5).trimStart()).join('\n'));
-            if (!raw.trim()) return null;
-            return JSON.parse(raw.trim());
-          }
-
-          async function mcpPost(body) {
-            const headers = { 'content-type': 'application/json', 'accept': 'application/json, text/event-stream' };
-            if (sessionId) headers['mcp-session-id'] = sessionId;
-            if (body.method !== 'initialize') headers['mcp-protocol-version'] = PROTOCOL_VERSION;
-            const response = await fetch(`${MCP_BASE}${MCP_PATH}`, {
-              method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30000),
-            });
-            const raw = await response.text();
-            let payload = null;
-            try { payload = parseMcpBody(raw); }
-            catch { throw new Error(`Invalid MCP response ${response.status}: ${raw.slice(0, 700)}`); }
-            if (!response.ok) throw new Error(`MCP HTTP ${response.status}: ${raw.slice(0, 700)}`);
-            return { response, payload };
-          }
-
-          async function rpc(method, params = {}) {
-            const id = requestId++;
-            const { payload } = await mcpPost({ jsonrpc: '2.0', id, method, params });
-            if (payload?.error) throw new Error(payload.error.message || JSON.stringify(payload.error));
-            return payload?.result;
-          }
-
-          async function initializeMcp() {
-            const { response, payload } = await mcpPost({
-              jsonrpc: '2.0', id: requestId++, method: 'initialize',
-              params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: 'pascal-3d-export-service', version: '1.0.0' } },
-            });
-            if (payload?.error) throw new Error(`MCP initialize failed: ${payload.error.message}`);
-            sessionId = response.headers.get('mcp-session-id') || undefined;
-            await mcpPost({ jsonrpc: '2.0', method: 'notifications/initialized' });
-            const list = await rpc('tools/list', {});
-            const names = new Set((list?.tools || []).map(tool => tool.name));
-            for (const required of ['get_scene', 'list_scenes', 'save_scene', 'export_json', 'load_scene']) {
-              if (!names.has(required)) throw new Error(`Pascal MCP is missing required tool: ${required}`);
-            }
-          }
-
-          function queueMcp(work) {
-            const task = requestQueue.then(work, work);
-            requestQueue = task.catch(() => {});
-            return task;
-          }
-
-          function unwrapToolResult(result) {
-            if (result?.isError) {
-              const message = result.content?.map(item => item.text || '').join('\n') || 'Pascal MCP tool failed';
-              throw new Error(message);
-            }
-            if (result?.structuredContent) return result.structuredContent;
-            const text = result?.content?.find(item => item.type === 'text')?.text;
-            if (typeof text === 'string') {
-              try { return JSON.parse(text); } catch { return { text }; }
-            }
-            return result ?? {};
-          }
-
-          async function tool(name, args = {}) {
-            const result = await rpc('tools/call', { name, arguments: args });
-            return unwrapToolResult(result);
-          }
-
-          function hasBuildingGeometry(graph) {
-            const types = new Set(['wall', 'slab', 'ceiling', 'roof', 'door', 'window', 'item', 'imported-mesh', 'column']);
-            return Object.values(graph?.nodes || {}).some(node => types.has(node?.type));
-          }
-
-          function extractGraph(value) {
-            if (value?.scene?.nodes) return value.scene;
-            if (value?.graph?.nodes) return value.graph;
-            if (value?.nodes && Array.isArray(value.rootNodeIds)) return value;
-            return null;
-          }
-
-          function fileSafeName(value) {
-            const base = path.basename(String(value || 'Pascal_3D_Export.glb'))
-              .replace(/[^\p{L}\p{N}._ -]+/gu, '_').replace(/\s+/g, '_');
-            return base.toLowerCase().endsWith('.glb') ? base : `${base}.glb`;
-          }
-
-          async function initializeWorkspace() {
-            const listed = await tool('list_scenes', { limit: 1000 });
-            const scenes = Array.isArray(listed?.scenes) ? listed.scenes : [];
-            if (scenes.length) {
-              scenes.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-              const selected = scenes[0];
-              sceneId = selected.id;
-              projectId = selected.projectId || null;
-              await tool('load_scene', { id: sceneId });
-              loadedVersion = Number(selected.version || 0);
-              selectedUpdatedAt = String(selected.updatedAt || '');
-              if (projectId) {
-                try {
-                  const project = await tool('get_project_status', { id: projectId });
-                  projectName = project?.name || selected.name || PROJECT_NAME_DEFAULT;
-                } catch { projectName = selected.name || PROJECT_NAME_DEFAULT; }
-              } else projectName = selected.name || PROJECT_NAME_DEFAULT;
-              sceneName = selected.name || sceneName;
-              fileName = `${sceneName.replace(/[^\p{L}\p{N}._ -]+/gu, '_').replace(/\s+/g, '_')}.scene.json`;
-              return;
-            }
-
-            projectName = PROJECT_NAME_DEFAULT;
-            fileName = FILE_NAME_DEFAULT;
-            try {
-              const created = await tool('create_project', { name: projectName, isPrivate: true });
-              projectId = created?.projectId || created?.id || null;
-            } catch (error) {
-              projectId = null;
-              console.log(`PROJECT_MODE=standalone_scene (${error?.message || error})`);
-            }
-            const saveArgs = { name: sceneName, includeCurrentScene: true, saveMode: 'draft' };
-            if (projectId) saveArgs.projectId = projectId;
-            else saveArgs.id = `scene_${crypto.randomUUID().replace(/-/g, '').slice(0, 24)}`;
-            const saved = await tool('save_scene', saveArgs);
-            sceneId = saved?.id || saveArgs.id || null;
-            loadedVersion = Number(saved?.version || 0);
-            selectedUpdatedAt = String(saved?.updatedAt || new Date().toISOString());
-            if (!sceneId) throw new Error('Pascal save_scene returned no scene ID.');
-            await tool('load_scene', { id: sceneId });
-          }
-
-          async function refreshGraph(requestedSceneId = null) {
-            const listed = await tool('list_scenes', { limit: 1000 });
-            const scenes = Array.isArray(listed?.scenes) ? listed.scenes : [];
-            if (requestedSceneId) {
-              const selected = scenes.find(scene => scene.id === requestedSceneId);
-              if (!selected) throw new Error(`Requested Pascal scene was not found: ${requestedSceneId}`);
-              if (selected.id !== sceneId || Number(selected.version || 0) > loadedVersion) {
-                await tool('load_scene', { id: selected.id });
-                sceneId = selected.id;
-                projectId = selected.projectId || projectId;
-                loadedVersion = Number(selected.version || 0);
-                selectedUpdatedAt = String(selected.updatedAt || '');
-                sceneName = selected.name || sceneName;
-              }
-            } else if (scenes.length) {
-              // Explicit export snapshots the newest saved scene, even if ChatGPT created
-              // it as a new SceneStore entry rather than replacing the viewer's previous ID.
-              scenes.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-              const newest = scenes[0];
-              const newestTime = Date.parse(newest.updatedAt || '') || 0;
-              const selectedTime = Date.parse(selectedUpdatedAt || '') || 0;
-              if (newest.id !== sceneId && newestTime >= selectedTime) {
-                await tool('load_scene', { id: newest.id });
-                sceneId = newest.id;
-                projectId = newest.projectId || null;
-                loadedVersion = Number(newest.version || 0);
-                selectedUpdatedAt = String(newest.updatedAt || '');
-                sceneName = newest.name || sceneName;
-              } else if (newest.id === sceneId && Number(newest.version || 0) > loadedVersion) {
-                await tool('load_scene', { id: sceneId });
-                loadedVersion = Number(newest.version || 0);
-                selectedUpdatedAt = String(newest.updatedAt || selectedUpdatedAt);
-              }
-            }
-
-            const value = await tool('get_scene', {});
-            const candidate = extractGraph(value);
-            if (!candidate) throw new Error(`get_scene did not return a SceneGraph: ${JSON.stringify(value).slice(0, 500)}`);
-            const graph = hasBuildingGeometry(candidate) ? candidate : seedGraph;
-            graphSource = graph === candidate ? 'pascal-mcp-scene' : 'verified-pascal-seed-fallback';
-            const serialized = JSON.stringify(graph);
-            latestGraphHash = crypto.createHash('sha256').update(serialized).digest('hex');
-            latestGraph = graph;
-            lastError = '';
-            console.log(`PASCAL_EXPORT_SOURCE nodes=${Object.keys(graph.nodes || {}).length} source=${graphSource} scene=${sceneId || 'unknown'}`);
-            return graph;
-          }
-
-          const MATERIALS = {
-            plaster: { color: '#e4dfd5', roughness: 0.88 },
-            floor: { color: '#9da6b0', roughness: 0.78 },
-            ceiling: { color: '#e9edf0', roughness: 0.92 },
-            wood: { color: '#98704d', roughness: 0.72 },
-            frame: { color: '#d5dbe2', roughness: 0.45 },
-            glass: { color: '#79cbe4', roughness: 0.14, opacity: 0.38, doubleSided: true },
-            roof: { color: '#566273', roughness: 0.86 },
-            generic: { color: '#9ba9bb', roughness: 0.72 },
-          };
-
-          function hexColor(value, fallback) {
-            if (typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)) return value;
-            return fallback;
-          }
-
-          function triangulate(points) {
-            if (points.length < 3) return [];
-            const area = points.reduce((sum, p, i) => {
-              const q = points[(i + 1) % points.length];
-              return sum + p[0] * q[1] - q[0] * p[1];
-            }, 0) / 2;
-            const orientation = area >= 0 ? 1 : -1;
-            const ids = points.map((_, i) => i);
-            const triangles = [];
-            const cross = (a, b, c) => (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
-            const inside = (p, a, b, c) => {
-              const c1 = (b[0]-a[0])*(p[1]-a[1])-(b[1]-a[1])*(p[0]-a[0]);
-              const c2 = (c[0]-b[0])*(p[1]-b[1])-(c[1]-b[1])*(p[0]-b[0]);
-              const c3 = (a[0]-c[0])*(p[1]-c[1])-(a[1]-c[1])*(p[0]-c[0]);
-              return orientation > 0 ? c1 >= -1e-9 && c2 >= -1e-9 && c3 >= -1e-9 : c1 <= 1e-9 && c2 <= 1e-9 && c3 <= 1e-9;
-            };
-            let guard = 0;
-            while (ids.length > 3 && guard++ < points.length * points.length) {
-              let clipped = false;
-              for (let i = 0; i < ids.length; i++) {
-                const ia = ids[(i + ids.length - 1) % ids.length], ib = ids[i], ic = ids[(i + 1) % ids.length];
-                const a = points[ia], b = points[ib], c = points[ic];
-                if (orientation * cross(a, b, c) <= 1e-9) continue;
-                let hasPoint = false;
-                for (const id of ids) {
-                  if (id === ia || id === ib || id === ic) continue;
-                  if (inside(points[id], a, b, c)) { hasPoint = true; break; }
-                }
-                if (hasPoint) continue;
-                triangles.push([ia, ib, ic]);
-                ids.splice(i, 1);
-                clipped = true;
-                break;
-              }
-              if (!clipped) break;
-            }
-            if (ids.length === 3) triangles.push([...ids]);
-            if (!triangles.length) {
-              for (let i = 1; i < points.length - 1; i++) triangles.push([0, i, i + 1]);
-            }
-            return triangles;
-          }
-
-          function makeGlb(graph) {
-            const groups = new Map();
-            const unsupported = new Set();
-            const nodeTypes = Object.values(graph.nodes || {});
-            const nodes = graph.nodes || {};
-            const materialFor = (name, color) => {
-              const key = `${name}|${color || ''}`;
-              if (!groups.has(key)) groups.set(key, {
-                name, color: color || MATERIALS[name]?.color || MATERIALS.generic.color,
-                roughness: MATERIALS[name]?.roughness ?? 0.75,
-                opacity: MATERIALS[name]?.opacity ?? 1,
-                doubleSided: MATERIALS[name]?.doubleSided ?? false,
-                positions: [], normals: [],
-              });
-              return groups.get(key);
-            };
-            const addTri = (a, b, c, mat, expected = null) => {
-              const ab = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-              const ac = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-              let n = [ab[1]*ac[2]-ab[2]*ac[1], ab[2]*ac[0]-ab[0]*ac[2], ab[0]*ac[1]-ab[1]*ac[0]];
-              const length = Math.hypot(...n);
-              if (length < 1e-10) return;
-              n = n.map(value => value / length);
-              if (expected && n[0]*expected[0]+n[1]*expected[1]+n[2]*expected[2] < 0) {
-                const temp = b; b = c; c = temp; n = n.map(value => -value);
-              }
-              for (const p of [a,b,c]) { mat.positions.push(p[0],p[1],p[2]); mat.normals.push(n[0],n[1],n[2]); }
-            };
-            const addQuad = (a,b,c,d,mat,expected) => {
-              addTri(a,b,c,mat,expected); addTri(a,c,d,mat,expected);
-            };
-            const addBox = (center, size, mat, yaw = 0) => {
-              const [sx,sy,sz] = size;
-              if (sx <= 1e-5 || sy <= 1e-5 || sz <= 1e-5) return;
-              const c = Math.cos(yaw), s = Math.sin(yaw);
-              const transform = (x,y,z) => [center[0] + x*c + z*s, center[1] + y, center[2] - x*s + z*c];
-              const x=sx/2, y=sy/2, z=sz/2;
-              const v = [
-                transform(-x,-y,-z), transform(x,-y,-z), transform(x,y,-z), transform(-x,y,-z),
-                transform(-x,-y,z), transform(x,-y,z), transform(x,y,z), transform(-x,y,z),
-              ];
-              const faces = [[0,3,2,1],[4,5,6,7],[0,4,7,3],[1,2,6,5],[0,1,5,4],[3,7,6,2]];
-              for (const face of faces) {
-                const pts = face.map(index => v[index]);
-                const centerFace = [0,1,2].map(axis => pts.reduce((sum,p)=>sum+p[axis],0)/4);
-                const outward = [centerFace[0]-center[0],centerFace[1]-center[1],centerFace[2]-center[2]];
-                const len = Math.hypot(...outward) || 1;
-                addQuad(pts[0],pts[1],pts[2],pts[3],mat,outward.map(n=>n/len));
-              }
-            };
-            const addPrism = (points, bottom, top, mat) => {
-              if (!Array.isArray(points) || points.length < 3 || top <= bottom) return;
-              const tris = triangulate(points);
-              const to3 = (p,y) => [p[0], y, p[1]];
-              for (const tri of tris) {
-                const p = tri.map(index => points[index]);
-                addTri(to3(p[0],top),to3(p[1],top),to3(p[2],top),mat,[0,1,0]);
-                addTri(to3(p[0],bottom),to3(p[2],bottom),to3(p[1],bottom),mat,[0,-1,0]);
-              }
-              for (let i=0;i<points.length;i++) {
-                const a=points[i], b=points[(i+1)%points.length];
-                const mid=[(a[0]+b[0])/2,(bottom+top)/2,(a[1]+b[1])/2];
-                const dx=b[0]-a[0], dz=b[1]-a[1];
-                const normal=[-dz,0,dx]; const nl=Math.hypot(normal[0],normal[2])||1;
-                addQuad(to3(a,bottom),to3(b,bottom),to3(b,top),to3(a,top),mat,[normal[0]/nl,0,normal[2]/nl]);
-              }
-            };
-
-            const building = nodeTypes.find(node => node.type === 'building');
-            const buildingPos = Array.isArray(building?.position) ? building.position : [0,0,0];
-            const levels = nodeTypes.filter(node => node.type === 'level');
-            const levelById = new Map(levels.map(level => [level.id, level]));
-            const levelFor = node => {
-              let current = node;
-              const guard = new Set();
-              while (current && !guard.has(current.id)) {
-                guard.add(current.id);
-                if (current.type === 'level') return current;
-                current = nodes[current.parentId];
-              }
-              return levels[0] || { baseElevation: 0, height: 2.5 };
-            };
-            const baseFor = node => buildingPos[1] + Number(levelFor(node).baseElevation || 0);
-            const walls = nodeTypes.filter(node => node.type === 'wall');
-            const wallById = new Map(walls.map(wall => [wall.id, wall]));
-            const openingsFor = wall => {
-              const ids = new Set([...(wall.children || [])]);
-              return nodeTypes.filter(node => (node.type === 'door' || node.type === 'window') && (node.parentId === wall.id || node.wallId === wall.id || ids.has(node.id)));
-            };
-            const wallMaterial = materialFor('plaster');
-            for (const wall of walls) {
-              if (!Array.isArray(wall.start) || !Array.isArray(wall.end)) { unsupported.add('wall-without-start-end'); continue; }
-              const sx=wall.start[0]+buildingPos[0], sz=wall.start[1]+buildingPos[2];
-              const dx=wall.end[0]-wall.start[0], dz=wall.end[1]-wall.start[1];
-              const len=Math.hypot(dx,dz); if (len < 0.001) continue;
-              const dir=[dx/len,dz/len];
-              const thickness=Number(wall.thickness || 0.2);
-              const height=Number(wall.height || levelFor(wall).height || 2.5);
-              const base=baseFor(wall);
-              const yaw=Math.atan2(-dir[1],dir[0]);
-              const openings=openingsFor(wall).map(opening => {
-                const pos=Array.isArray(opening.position)?opening.position:[len/2,opening.height/2,0];
-                const width=Number(opening.width||0.9), h=Number(opening.height||2.0);
-                return { node:opening, x0:Math.max(0,Number(pos[0]||0)-width/2), x1:Math.min(len,Number(pos[0]||0)+width/2), y0:Math.max(0,Number(pos[1]||h/2)-h/2), y1:Math.min(height,Number(pos[1]||h/2)+h/2), width, h, x:Number(pos[0]||0), y:Number(pos[1]||h/2) };
-              }).filter(opening=>opening.x1>opening.x0 && opening.y1>opening.y0);
-              const xs=[0,len,...openings.flatMap(o=>[o.x0,o.x1])].sort((a,b)=>a-b).filter((v,i,a)=>i===0||Math.abs(v-a[i-1])>1e-5);
-              const ys=[0,height,...openings.flatMap(o=>[o.y0,o.y1])].sort((a,b)=>a-b).filter((v,i,a)=>i===0||Math.abs(v-a[i-1])>1e-5);
-              for(let xi=0;xi<xs.length-1;xi++) for(let yi=0;yi<ys.length-1;yi++) {
-                const x0=xs[xi],x1=xs[xi+1],y0=ys[yi],y1=ys[yi+1];
-                if(x1-x0<1e-4||y1-y0<1e-4) continue;
-                const mx=(x0+x1)/2,my=(y0+y1)/2;
-                if(openings.some(o=>mx>o.x0-1e-5&&mx<o.x1+1e-5&&my>o.y0-1e-5&&my<o.y1+1e-5)) continue;
-                const along=(x0+x1)/2;
-                const center=[sx+dir[0]*along,base+(y0+y1)/2,sz+dir[1]*along];
-                addBox(center,[x1-x0,y1-y0,thickness],wallMaterial,yaw);
-              }
-              for(const o of openings) {
-                const frame=materialFor('frame');
-                const frameW=Math.min(0.06,Math.max(0.025,Number(o.node.frameThickness||0.045)));
-                const depth=thickness+0.07;
-                const centerAt=(along, y, depthOffset=0)=>[sx+dir[0]*along+(-dir[1])*depthOffset,base+y,sz+dir[1]*along+dir[0]*depthOffset];
-                const jambY=(o.y0+o.y1)/2, jambH=o.y1-o.y0;
-                addBox(centerAt(o.x0+frameW/2,jambY),[frameW,jambH,depth],frame,yaw);
-                addBox(centerAt(o.x1-frameW/2,jambY),[frameW,jambH,depth],frame,yaw);
-                addBox(centerAt(o.x,(o.y1-frameW/2)),[o.x1-o.x0,frameW,depth],frame,yaw);
-                if(o.node.type==='window') {
-                  addBox(centerAt(o.x,o.y0+frameW/2),[o.x1-o.x0,frameW,depth],frame,yaw);
-                  const glass=materialFor('glass');
-                  addBox(centerAt(o.x,jambY,0.008),[Math.max(0.02,o.x1-o.x0-2*frameW),Math.max(0.02,jambH-2*frameW),0.025],glass,yaw);
-                } else {
-                  const door=materialFor('wood',hexColor(o.node.color,MATERIALS.wood.color));
-                  addBox(centerAt(o.x,jambY,0.012),[Math.max(0.02,o.x1-o.x0-2*frameW),Math.max(0.02,jambH-frameW),0.045],door,yaw);
-                }
-              }
-            }
-
-            for (const node of nodeTypes) {
-              const base=baseFor(node);
-              if (node.type==='slab') {
-                const poly=(node.polygon||[]).map(p=>[Number(p[0])+buildingPos[0],Number(p[1])+buildingPos[2]]);
-                if(poly.length>=3) addPrism(poly,base+Number(node.elevation||0)-Number(node.thickness||0.05),base+Number(node.elevation||0),materialFor('floor'));
-              } else if (node.type==='ceiling' || node.type==='roof') {
-                const poly=(node.polygon||[]).map(p=>[Number(p[0])+buildingPos[0],Number(p[1])+buildingPos[2]]);
-                if(poly.length>=3) {
-                  const level=levelFor(node);
-                  const y=base+Number(node.elevation ?? level.height ?? 2.5);
-                  addPrism(poly,y-0.045,y,materialFor(node.type==='roof'?'roof':'ceiling'));
-                } else unsupported.add(node.type+'-without-polygon');
-              } else if (node.type==='column') {
-                const p=node.position||[0,0];
-                const w=Number(node.width||0.3),d=Number(node.depth||w),h=Number(node.height||2.5);
-                addBox([p[0]+buildingPos[0],base+h/2,p[1]+buildingPos[2]],[w,h,d],materialFor('generic'));
-              } else if (node.type==='item' && Array.isArray(node.position)) {
-                const dims=node.dimensions||node.size||[node.width||0.5,node.height||0.8,node.depth||0.5];
-                if(Array.isArray(dims)&&dims.length>=3) addBox([node.position[0]+buildingPos[0],base+node.position[1]+Number(dims[1])/2,node.position[2]+buildingPos[2]],[Number(dims[0]),Number(dims[1]),Number(dims[2])],materialFor('generic'));
-                else unsupported.add('item-without-dimensions');
-              } else if (!['site','building','level','wall','zone','door','window','slab','ceiling','roof','column','item'].includes(node.type)) {
-                unsupported.add(String(node.type||'unknown'));
-              }
-            }
-
-            const meshGroups=[...groups.values()].filter(group=>group.positions.length>=9);
-            if(!meshGroups.length) throw new Error('No exportable 3D geometry was found in the Pascal SceneGraph.');
-            const chunks=[]; const bufferViews=[]; const accessors=[]; const materials=[]; const primitives=[]; let byteOffset=0;
-            const appendBytes=(typed)=>{
-              const raw=Buffer.from(typed.buffer,typed.byteOffset,typed.byteLength);
-              const pad=(4-(byteOffset%4))%4;
-              if(pad){chunks.push(Buffer.alloc(pad));byteOffset+=pad;}
-              const offset=byteOffset; chunks.push(raw); byteOffset+=raw.length; return {byteOffset:offset,byteLength:raw.length};
-            };
-            const allPositions=[];
-            for(const group of meshGroups){
-              const positions=Float32Array.from(group.positions), normals=Float32Array.from(group.normals);
-              const posRange=appendBytes(positions); const normRange=appendBytes(normals);
-              const posView=bufferViews.push({buffer:0,...posRange,target:34962})-1;
-              const normView=bufferViews.push({buffer:0,...normRange,target:34962})-1;
-              const mins=[Infinity,Infinity,Infinity],maxs=[-Infinity,-Infinity,-Infinity];
-              for(let i=0;i<positions.length;i+=3){for(let a=0;a<3;a++){mins[a]=Math.min(mins[a],positions[i+a]);maxs[a]=Math.max(maxs[a],positions[i+a]);allPositions.push(positions[i+a]);}}
-              const posAccessor=accessors.push({bufferView:posView,componentType:5126,count:positions.length/3,type:'VEC3',min:mins,max:maxs})-1;
-              const normAccessor=accessors.push({bufferView:normView,componentType:5126,count:normals.length/3,type:'VEC3'})-1;
-              const color=group.color.match(/[0-9a-f]{2}/gi).map(hex=>parseInt(hex,16)/255);
-              const matIndex=materials.push({name:group.name,pbrMetallicRoughness:{baseColorFactor:[...color,group.opacity],metallicFactor:0,roughnessFactor:group.roughness},alphaMode:group.opacity<1?'BLEND':'OPAQUE',doubleSided:group.doubleSided})-1;
-              primitives.push({attributes:{POSITION:posAccessor,NORMAL:normAccessor},material:matIndex,mode:4});
-            }
-            const binary=Buffer.concat(chunks); const binaryPad=(4-(binary.length%4))%4;
-            const binChunk=binaryPad?Buffer.concat([binary,Buffer.alloc(binaryPad)]):binary;
-            const gltf={asset:{version:'2.0',generator:'Pascal Snapshot Exporter'},scene:0,scenes:[{nodes:[0]}],nodes:[{name:'Pascal 3D Export',mesh:0}],meshes:[{name:'Pascal Building',primitives}],materials,accessors,bufferViews,buffers:[{byteLength:binary.length}]};
-            const json=Buffer.from(JSON.stringify(gltf)); const jsonPad=(4-(json.length%4))%4;
-            const jsonChunk=jsonPad?Buffer.concat([json,Buffer.alloc(jsonPad,0x20)]):json;
-            const total=12+8+jsonChunk.length+8+binChunk.length;
-            const header=Buffer.alloc(12);header.writeUInt32LE(0x46546c67,0);header.writeUInt32LE(2,4);header.writeUInt32LE(total,8);
-            const jsonHeader=Buffer.alloc(8);jsonHeader.writeUInt32LE(jsonChunk.length,0);jsonHeader.writeUInt32LE(0x4e4f534a,4);
-            const binHeader=Buffer.alloc(8);binHeader.writeUInt32LE(binChunk.length,0);binHeader.writeUInt32LE(0x004e4942,4);
-            const glb=Buffer.concat([header,jsonHeader,jsonChunk,binHeader,binChunk]);
-            const nodeTypeCounts=nodeTypes.reduce((acc,node)=>{acc[node.type]=(acc[node.type]||0)+1;return acc;},{});
-            return {glb,report:{nodeCount:nodeTypes.length,meshCount:meshGroups.length,triangleCount:meshGroups.reduce((sum,g)=>sum+g.positions.length/9,0),materialCount:materials.length,nodeTypeCounts,unsupportedNodeTypes:[...unsupported]}};
-          }
-
-          async function exportSnapshot(args={}) {
-            if(args.sceneId && args.sceneId!==sceneId) await tool('load_scene',{id:args.sceneId});
-            const graph=await refreshGraph(args.sceneId||null);
-            if(!hasBuildingGeometry(graph)) throw new Error('SceneGraph has no exportable architectural geometry.');
-            const {glb,report}=makeGlb(graph);
-            await fs.mkdir(EXPORT_DIR,{recursive:true});
-            const stamp=new Date().toISOString().replace(/[:.]/g,'-');
-            const requested=fileSafeName(args.filename||sceneName.replace(/[^\p{L}\p{N}._ -]+/gu,'_').replace(/\s+/g,'_')); 
-            const fileName=requested.replace(/\.glb$/i,'')+'_'+stamp+'.glb';
-            const versionDir=path.join(EXPORT_DIR,'versions');
-            await fs.mkdir(versionDir,{recursive:true});
-            const versionPath=path.join(versionDir,fileName);
-            const latestPath=path.join(EXPORT_DIR,'latest.glb');
-            const tempPath=path.join(EXPORT_DIR,`.latest-${crypto.randomUUID()}.tmp`);
-            await fs.writeFile(versionPath,glb);
-            await fs.writeFile(tempPath,glb);
-            await fs.rename(tempPath,latestPath);
-            const exportId=crypto.randomUUID();
-            const manifest={
-              exportId,fileName,latestFile:'latest.glb',createdAt:new Date().toISOString(),
-              projectName,sceneName,sceneId,projectId,source:graphSource,nodeCount:report.nodeCount,
-              sizeBytes:glb.length,sizeLabel:glb.length<1048576?`${(glb.length/1024).toFixed(1)} KB`:`${(glb.length/1048576).toFixed(2)} MB`,
-              triangleCount:report.triangleCount,meshCount:report.meshCount,materialCount:report.materialCount,
-              nodeTypeCounts:report.nodeTypeCounts,unsupportedNodeTypes:report.unsupportedNodeTypes,
-              graphHash:latestGraphHash,downloadUrl:'/exports/latest.glb',versionUrl:`/exports/versions/${encodeURIComponent(fileName)}`,
-            };
-            await fs.writeFile(path.join(EXPORT_DIR,'latest.json'),JSON.stringify(manifest,null,2));
-            latestExport=manifest;
-            broadcastExport('exported',manifest);
-            console.log(`PASCAL_3D_EXPORT=PASS file=${fileName} bytes=${glb.length} triangles=${report.triangleCount} nodes=${report.nodeCount}`);
-            return manifest;
-          }
-
-          function broadcastExport(eventName,payload){
-            for(const response of exportClients){try{response.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);}catch{exportClients.delete(response);}}
-          }
-
-          async function readJson(req,limit=1024*1024){
-            const chunks=[];let size=0;
-            for await(const chunk of req){size+=chunk.length;if(size>limit)throw new Error('Request body too large.');chunks.push(chunk);}
-            if(!chunks.length)return {};
-            return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          }
-
-          const mime={
-            '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8',
-            '.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.png':'image/png','.woff2':'font/woff2','.glb':'model/gltf-binary',
-          };
-
-          async function sendFile(res,pathname){
-            const relative=decodeURIComponent(pathname.replace(/^\/+/,''));
-            if(relative.includes('..')){res.writeHead(400);res.end('Invalid path');return;}
-            const root=relative.startsWith('exports/')?EXPORT_DIR:path.join(APP_DIR,'dist');
-            const local=relative.startsWith('exports/')?relative.slice('exports/'.length):relative||'index.html';
-            const full=path.resolve(root,local);
-            if(!full.startsWith(path.resolve(root)+path.sep)&&full!==path.resolve(root,'index.html')){res.writeHead(400);res.end('Invalid path');return;}
-            try{
-              const stat=await fs.stat(full);
-              if(!stat.isFile())throw new Error('Not a file');
-              res.writeHead(200,{'content-type':mime[path.extname(full)]||'application/octet-stream','content-length':stat.size,'cache-control':relative.startsWith('exports/')?'no-store':'public, max-age=3600'});
-              createReadStream(full).pipe(res);
-            }catch{
-              if(relative.startsWith('assets/')||/\.(js|mjs|css|map|woff2?)$/i.test(relative)){res.writeHead(404,{'content-type':'text/plain; charset=utf-8'});res.end(`File not found: ${relative}`);return;}
-              try{const body=await fs.readFile(path.join(APP_DIR,'dist','index.html'));res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store'});res.end(body);}
-              catch{res.writeHead(500);res.end('Viewer frontend unavailable');}
-            }
-          }
-
-          const server=http.createServer(async(req,res)=>{
-            try{
-              const url=new URL(req.url||'/','http://127.0.0.1');
-              if(req.method==='GET'&&url.pathname==='/api/health'){
-                res.writeHead(200,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-                res.end(JSON.stringify({ok:true,viewer:'pascal-3d-snapshot',mode:'explicit-export-only',hasExport:!!latestExport,latestExport,sceneId}));return;
-              }
-              if(req.method==='GET'&&url.pathname==='/api/export-status'){
-                if(!latestExport){try{latestExport=JSON.parse(await fs.readFile(path.join(EXPORT_DIR,'latest.json'),'utf8'));}catch{}}
-                res.writeHead(200,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-                res.end(JSON.stringify({export:latestExport,error:lastError}));return;
-              }
-              if(req.method==='GET'&&url.pathname==='/api/export-events'){
-                res.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform','connection':'keep-alive','x-accel-buffering':'no'});
-                res.write(': connected\n\n');exportClients.add(res);
-                if(latestExport)res.write(`event: exported\ndata: ${JSON.stringify(latestExport)}\n\n`);
-                req.on('close',()=>exportClients.delete(res));return;
-              }
-              if(req.method==='POST'&&url.pathname==='/api/export'){
-                const args=await readJson(req);
-                const result=await queueMcp(()=>exportSnapshot(args));
-                res.writeHead(200,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-                res.end(JSON.stringify({...result,viewerUrl:process.env.PASCAL_VIEWER_PUBLIC_URL||'/',downloadUrl:'/exports/latest.glb'}));return;
-              }
-              if(req.method==='POST'&&url.pathname==='/api/save'){
-                const result=await queueMcp(async()=>{
-                  const graph=latestGraph||await refreshGraph();
-                  if(!hasBuildingGeometry(graph))throw new Error('There is no valid building SceneGraph to back up.');
-                  const saved=await tool('save_scene',{name:sceneName,includeCurrentScene:false,graph,saveMode:'checkpoint',...(sceneId?{id:sceneId}:{})});
-                  if(saved?.id)sceneId=saved.id;
-                  const workDir=await fs.mkdtemp(path.join(os.tmpdir(),'pascal-backup-'));
-                  const payloadDir=path.join(workDir,'Pascal_Project_Backup');
-                  await fs.mkdir(payloadDir,{recursive:true});
-                  await fs.cp(DATA_DIR,path.join(payloadDir,'pascal-data'),{recursive:true,force:true});
-                  await fs.writeFile(path.join(payloadDir,fileName),JSON.stringify(graph,null,2),'utf8');
-                  await fs.writeFile(path.join(payloadDir,'project-manifest.json'),JSON.stringify({projectName,projectId,sceneName,sceneId,savedVersion:saved?.version??null,createdAt:new Date().toISOString(),latestExport},null,2),'utf8');
-                  const archivePath=path.join(os.tmpdir(),`pascal-backup-${crypto.randomUUID()}.zip`);
-                  await execFileAsync('zip',['-q','-r',archivePath,'Pascal_Project_Backup'],{cwd:workDir,maxBuffer:32*1024*1024});
-                  return {workDir,archivePath};
-                });
-                const stat=await fs.stat(result.archivePath);
-                res.writeHead(200,{'content-type':'application/zip','content-length':stat.size,'content-disposition':'attachment; filename="Pascal_Project_Backup.zip"','cache-control':'no-store'});
-                const stream=createReadStream(result.archivePath);stream.on('close',()=>{fs.rm(result.workDir,{recursive:true,force:true}).catch(()=>{});fs.rm(result.archivePath,{force:true}).catch(()=>{});});stream.pipe(res);return;
-              }
-              if(req.method==='GET'&&url.pathname.startsWith('/exports/')){await sendFile(res,url.pathname);return;}
-              if(req.method==='GET'){await sendFile(res,url.pathname);return;}
-              res.writeHead(405,{'content-type':'text/plain; charset=utf-8'});res.end('Method not allowed');
-            }catch(error){
-              lastError=error?.message||String(error);
-              console.error('PASCAL_VIEWER_REQUEST_ERROR',lastError);
-              if(!res.headersSent)res.writeHead(500,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});
-              res.end(JSON.stringify({ok:false,error:lastError}));
-            }
-          });
-
-          await fs.mkdir(EXPORT_DIR,{recursive:true});
-          seedGraph=JSON.parse(await fs.readFile(SEED_GRAPH_PATH,'utf8'));
-          await initializeMcp();
-          await queueMcp(initializeWorkspace);
-          try{latestExport=JSON.parse(await fs.readFile(path.join(EXPORT_DIR,'latest.json'),'utf8'));}catch{}
-          server.listen(8090,'127.0.0.1',()=>{
-            console.log('Pascal 3D snapshot server listening on 127.0.0.1:8090');
-            console.log(`PROJECT_NAME=${projectName}`);
-            console.log(`SCENE_ID=${sceneId||'none'}`);
-            console.log('PASCAL_VIEWER_MODE=EXPLICIT_GLB_EXPORT_ONLY');
-          });
-          SERVER
-
-          APP_DIR="$APP_DIR" \
-          MCP_LOCAL_BASE="http://127.0.0.1:8787" \
-          MCP_PATH="$MCP_PATH" \
-          PASCAL_PROJECT_NAME="$PROJECT_NAME" \
-          PASCAL_SCENE_FILE_NAME="$SCENE_FILE_NAME" \
-          PASCAL_DATA_DIR="$DATA_DIR" \
-          nohup node "$RUNNER_TEMP/pascal-viewer-server.mjs" \
-            > "$RUNNER_TEMP/pascal-viewer-server.log" 2>&1 < /dev/null &
-          echo $! > "$RUNNER_TEMP/pascal-viewer-server.pid"
-
-          echo "Waiting for Pascal 3D snapshot monitor..."
-          VIEWER_READY=0
-          for _ in $(seq 1 90); do
-            CODE="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/ 2>/dev/null || true)"
-            if [[ "$CODE" == "200" ]]; then VIEWER_READY=1; break; fi
-            if ! kill -0 "$(cat "$RUNNER_TEMP/pascal-viewer-server.pid")" 2>/dev/null; then
-              echo "Snapshot server exited unexpectedly:" >&2
-              cat "$RUNNER_TEMP/pascal-viewer-server.log" >&2 || true
-              exit 1
-            fi
-            sleep 1
-          done
-          if [[ "$VIEWER_READY" != "1" ]]; then
-            echo "Snapshot monitor did not become ready:" >&2
-            cat "$RUNNER_TEMP/pascal-viewer-server.log" >&2 || true
-            exit 1
-          fi
-          curl -fsS http://127.0.0.1:8090/api/health -o "$RUNNER_TEMP/viewer-health.json"
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          const health = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + '/viewer-health.json', 'utf8'));
-          if (!health.ok || health.mode !== 'explicit-export-only') throw new Error('Viewer did not start in explicit 3D export mode.');
-          console.log(`PASCAL_SNAPSHOT_MONITOR=PASS mode=${health.mode}`);
-          NODE
-
-          # Verify Vite assets are present. This catches a blank frontend before publishing the tunnel.
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import path from 'node:path';
-          const root = process.env.RUNNER_TEMP + '/pascal-viewer-app/dist';
-          const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
-          const refs = [...html.matchAll(/(?:src|href)="\/(assets\/[^\"]+)"/g)].map(match => match[1]);
-          if (!refs.length) throw new Error('Vite output has no frontend asset references.');
-          for (const ref of refs) if (!fs.existsSync(path.join(root, ref))) throw new Error(`Missing frontend asset: ${ref}`);
-          console.log(`PASCAL_SNAPSHOT_FRONTEND_ASSETS=PASS assets=${refs.length}`);
-          NODE
-
-          # Publish the monitor first; it receives a new frozen GLB only after an explicit MCP export call.
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8090 \
-            > "$RUNNER_TEMP/cloudflared-viewer.log" 2>&1 < /dev/null &
-          echo $! > "$RUNNER_TEMP/cloudflared-viewer.pid"
-          VIEWER_URL="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-viewer.log")"
-          echo "VIEWER_URL=$VIEWER_URL" >> "$GITHUB_ENV"
-
-          # MCP facade adds an explicit export command while forwarding all original Pascal tools.
-          cat > "$RUNNER_TEMP/pascal-mcp-export-proxy.mjs" <<'PROXY'
-                    import http from 'node:http';
-
-          const UPSTREAM = process.env.MCP_UPSTREAM || 'http://127.0.0.1:8787';
-          const UPSTREAM_PATH = process.env.MCP_PATH || '/mcp';
-          const VIEWER = process.env.PASCAL_VIEWER_BASE || 'http://127.0.0.1:8090';
-          const VIEWER_PUBLIC = process.env.PASCAL_VIEWER_PUBLIC_URL || '';
-          const MAX_BODY = 4 * 1024 * 1024;
-          const MCP_LEGACY = '2025-06-18';
-          const MCP_MODERN = '2026-07-28';
-          let modernSessionId = null;
-          let modernSessionPromise = null;
-
-          function cors(res) {
-            res.setHeader('access-control-allow-origin', '*');
-            res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
-            res.setHeader('access-control-allow-headers', 'content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id, mcp-method, mcp-name');
-            res.setHeader('access-control-expose-headers', 'mcp-session-id, mcp-protocol-version');
-          }
-
-          async function readBody(req) {
-            const chunks=[]; let size=0;
-            for await (const chunk of req) { size += chunk.length; if(size>MAX_BODY) throw new Error('MCP request body too large'); chunks.push(chunk); }
-            if(!chunks.length) return null;
-            return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          }
-
-          function parseMcpResponse(raw) {
-            const lines=raw.split(/\r?\n/).filter(line=>line.startsWith('data:'));
-            if(lines.length) return JSON.parse(lines.map(line=>line.slice(5).trimStart()).join('\n'));
-            if(!raw.trim()) return null;
-            return JSON.parse(raw.trim());
-          }
-
-          function headerMatches(value, expected) {
-            if(!value) return false;
-            const raw=String(value);
-            const candidates=[raw];
-            try { candidates.push(decodeURIComponent(raw)); } catch {}
-            try { candidates.push(Buffer.from(raw,'base64url').toString('utf8')); } catch {}
-            if(raw.startsWith('base64:')) { try { candidates.push(Buffer.from(raw.slice(7),'base64').toString('utf8')); } catch {} }
-            return candidates.includes(expected);
-          }
-
-          async function ensureModernSession() {
-            if(modernSessionId) return modernSessionId;
-            if(modernSessionPromise) return modernSessionPromise;
-            modernSessionPromise=(async()=>{
-              const response=await fetch(`${UPSTREAM}${UPSTREAM_PATH}`,{
-                method:'POST',
-                headers:{'content-type':'application/json','accept':'application/json, text/event-stream'},
-                body:JSON.stringify({jsonrpc:'2.0',id:87001,method:'initialize',params:{protocolVersion:MCP_LEGACY,capabilities:{},clientInfo:{name:'pascal-modern-proxy',version:'1.0.0'}}}),
-                signal:AbortSignal.timeout(30000),
-              });
-              const raw=await response.text();const payload=parseMcpResponse(raw);
-              if(!response.ok||payload?.error)throw new Error(`Internal MCP initialize failed: ${JSON.stringify(payload)}`);
-              modernSessionId=response.headers.get('mcp-session-id')||null;
-              if(!modernSessionId)throw new Error('Internal MCP server did not issue a session ID for modern protocol adapter.');
-              await fetch(`${UPSTREAM}${UPSTREAM_PATH}`,{
-                method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream','mcp-session-id':modernSessionId,'mcp-protocol-version':MCP_LEGACY},
-                body:JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'}),signal:AbortSignal.timeout(15000),
-              });
-              return modernSessionId;
-            })().catch(error=>{modernSessionPromise=null;throw error;});
-            return modernSessionPromise;
-          }
-
-          async function upstreamRequest(req, payload, modern=false) {
-            const headers={ 'content-type':'application/json', 'accept':'application/json, text/event-stream' };
-            if(modern){
-              headers['mcp-session-id']=await ensureModernSession();
-              headers['mcp-protocol-version']=MCP_LEGACY;
-            } else {
-              for(const name of ['mcp-session-id','mcp-protocol-version','last-event-id','origin']) {
-                const value=req.headers[name]; if(value) headers[name]=value;
-              }
-            }
-            const response=await fetch(`${UPSTREAM}${UPSTREAM_PATH}`,{
-              method:'POST',headers,body:JSON.stringify(payload),signal:AbortSignal.timeout(40000),
-            });
-            const raw=await response.text();
-            let result=null;
-            try { result=parseMcpResponse(raw); }
-            catch { throw new Error(`Upstream Pascal MCP returned an unparseable response (${response.status}): ${raw.slice(0,500)}`); }
-            return {response,result,raw};
-          }
-
-          const exportTool={
-            name:'export_3d_to_viewer',
-            description:'Create a frozen, standalone GLB 3D export from the current Pascal SceneGraph, save it to the Viewer exports folder, and immediately make that saved file appear in the 3D monitor. Call this only when the user explicitly asks to see a 3D export (for example: “3D export نشان بده”). This is NOT live synchronization: the viewer remains unchanged until this tool is called again. Supports architectural walls with rectangular door/window openings, slabs, ceilings, roofs with polygon outlines, columns, and dimensioned box items. Returns unsupported node types in the export report.',
-            inputSchema:{type:'object',properties:{sceneId:{type:'string',description:'Optional Pascal saved scene ID to export. Omit to export the current/latest saved scene.'},filename:{type:'string',description:'Optional output base filename. The server adds a unique timestamp and .glb extension.'}},additionalProperties:false}
-          };
-          const statusTool={
-            name:'get_latest_3d_export',
-            description:'Return metadata and download/viewer URLs for the most recently saved GLB snapshot. Does not refresh or export the current Pascal scene.',
-            inputSchema:{type:'object',properties:{},additionalProperties:false}
-          };
-
-          function sendJson(res,status,payload,extra={}) {
-            cors(res);res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store',...extra});res.end(JSON.stringify(payload));
-          }
-
-          function addSnapshotTools(payload) {
-            if(!payload?.result?.tools)return payload;
-            const tools=payload.result.tools;const names=new Set(tools.map(tool=>tool.name));
-            if(!names.has(exportTool.name))tools.push(exportTool);
-            if(!names.has(statusTool.name))tools.push(statusTool);
-            return payload;
-          }
-
-          function modernError(id,code,message) {
-            return {jsonrpc:'2.0',id,error:{code,message}};
-          }
-
-          const server=http.createServer(async(req,res)=>{
-            cors(res);
-            if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
-            const url=new URL(req.url||'/','http://127.0.0.1');
-            if(req.method==='GET'&&url.pathname==='/health'){
-              sendJson(res,200,{ok:true,proxy:'pascal-mcp-export-proxy',customTools:[exportTool.name,statusTool.name],modernProtocol:MCP_MODERN,upstream:`${UPSTREAM}${UPSTREAM_PATH}`});return;
-            }
-            if(!(url.pathname==='/mcp'||url.pathname==='/mcp/')){sendJson(res,404,{error:'Not found'});return;}
-            if(req.method==='GET'){
-              try{
-                const headers={accept:req.headers.accept||'text/event-stream'};
-                if(req.headers['mcp-session-id'])headers['mcp-session-id']=req.headers['mcp-session-id'];
-                const upstream=await fetch(`${UPSTREAM}${UPSTREAM_PATH}`,{method:'GET',headers});
-                res.statusCode=upstream.status;
-                for(const name of ['content-type','cache-control','mcp-session-id','mcp-protocol-version']){const value=upstream.headers.get(name);if(value)res.setHeader(name,value);}
-                if(upstream.body)for await(const chunk of upstream.body)res.write(chunk);
-                res.end();
-              }catch(error){sendJson(res,502,{error:error?.message||String(error)});}return;
-            }
-            if(req.method!=='POST'){sendJson(res,405,{error:'Method not allowed'});return;}
-            let currentRpcId=null;
-            try{
-              const payload=await readBody(req);
-              currentRpcId=payload?.id??null;
-              if(!payload||payload.jsonrpc!=='2.0'){sendJson(res,400,{error:'Invalid JSON-RPC payload'});return;}
-
-              const incomingProtocol=req.headers['mcp-protocol-version']||'';
-              const modern=incomingProtocol===MCP_MODERN||payload.method==='server/discover';
-              if(modern){
-                const incomingMethod=req.headers['mcp-method']||'';
-                const incomingName=req.headers['mcp-name']||'';
-                const meta=payload.params?._meta||{};
-                const bodyProtocol=meta['io.modelcontextprotocol/protocolVersion']||'';
-                if(incomingProtocol!==MCP_MODERN)return sendJson(res,400,modernError(currentRpcId,-32020,'MCP-Protocol-Version must be 2026-07-28.'));
-                if(incomingMethod!==payload.method)return sendJson(res,400,modernError(currentRpcId,-32020,'Mcp-Method header must exactly match the JSON-RPC method.'));
-                if(bodyProtocol!==MCP_MODERN)return sendJson(res,400,modernError(currentRpcId,-32020,'params._meta.io.modelcontextprotocol/protocolVersion must be 2026-07-28.'));
-                if(['tools/call','resources/read','prompts/get'].includes(payload.method)){
-                  const expected=String(payload.method==='resources/read'?(payload.params?.uri||''):(payload.params?.name||''));
-                  if(!headerMatches(incomingName,expected))return sendJson(res,400,modernError(currentRpcId,-32020,'Mcp-Name header must match params.name or params.uri.'));
-                }
-                if(payload.method==='server/discover'){
-                  sendJson(res,200,{jsonrpc:'2.0',id:payload.id,result:{
-                    resultType:'complete',supportedVersions:[MCP_MODERN],capabilities:{tools:{}},
-                    _meta:{'io.modelcontextprotocol/serverInfo':{name:'Pascal 3D Snapshot Export Monitor',version:'1.0.0'}},
-                    instructions:'Controls saved Pascal scene data and creates a frozen GLB 3D export on explicit request. The Viewer does not live-sync scene edits.',
-                    ttlMs:15000,cacheScope:'private'
-                  }},{'mcp-protocol-version':MCP_MODERN});return;
-                }
-              }
-
-              if(payload.method==='tools/call'&&payload.params?.name===exportTool.name){
-                const args=payload.params.arguments||{};
-                const response=await fetch(`${VIEWER}/api/export`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(args),signal:AbortSignal.timeout(120000)});
-                const raw=await response.text();let data;
-                try{data=JSON.parse(raw);}catch{throw new Error(`Viewer export API returned invalid JSON: ${raw.slice(0,500)}`);}
-                if(!response.ok||data.ok===false)throw new Error(data.error||`Viewer export failed with HTTP ${response.status}`);
-                const viewerUrl=VIEWER_PUBLIC||data.viewerUrl||'/';
-                const result={...data,viewerUrl,downloadUrl:`${viewerUrl.replace(/\/$/,'')}/exports/latest.glb`,versionDownloadUrl:data.versionUrl?`${viewerUrl.replace(/\/$/,'')}${data.versionUrl}`:undefined};
-                const headers=modern?{'mcp-protocol-version':MCP_MODERN}:{};
-                sendJson(res,200,{jsonrpc:'2.0',id:payload.id,result:{content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false}},headers);return;
-              }
-
-              if(payload.method==='tools/call'&&payload.params?.name===statusTool.name){
-                const response=await fetch(`${VIEWER}/api/export-status`,{cache:'no-store'});
-                const data=await response.json();
-                if(!response.ok)throw new Error(data.error||`Viewer status HTTP ${response.status}`);
-                const viewerUrl=VIEWER_PUBLIC||'/';
-                const result={...data.export,viewerUrl,downloadUrl:data.export?`${viewerUrl.replace(/\/$/,'')}/exports/latest.glb`:null};
-                const headers=modern?{'mcp-protocol-version':MCP_MODERN}:{};
-                sendJson(res,200,{jsonrpc:'2.0',id:payload.id,result:{content:[{type:'text',text:JSON.stringify(result)}],structuredContent:result,isError:false}},headers);return;
-              }
-
-              let forwardPayload=payload;
-              if(modern){
-                forwardPayload={...payload,params:{...(payload.params||{})}};
-                delete forwardPayload.params._meta;
-              }
-              const forwarded=await upstreamRequest(req,forwardPayload,modern);
-              if(payload.method==='tools/list'){
-                addSnapshotTools(forwarded.result);
-                const headers={};
-                const session=forwarded.response.headers.get('mcp-session-id');
-                if(!modern&&session)headers['mcp-session-id']=session;
-                headers['mcp-protocol-version']=modern?MCP_MODERN:(forwarded.response.headers.get('mcp-protocol-version')||MCP_LEGACY);
-                sendJson(res,200,forwarded.result||{},headers);return;
-              }
-
-              if(!forwarded.result&&payload.method?.startsWith('notifications/')){
-                const headers={'cache-control':'no-store'};
-                const session=forwarded.response.headers.get('mcp-session-id');
-                if(!modern&&session)headers['mcp-session-id']=session;
-                if(modern)headers['mcp-protocol-version']=MCP_MODERN;
-                cors(res);res.writeHead(forwarded.response.status,headers);res.end();return;
-              }
-              const headers={'mcp-protocol-version':modern?MCP_MODERN:(forwarded.response.headers.get('mcp-protocol-version')||MCP_LEGACY)};
-              const session=forwarded.response.headers.get('mcp-session-id');if(!modern&&session)headers['mcp-session-id']=session;
-              sendJson(res,forwarded.response.status,forwarded.result||{},headers);
-            }catch(error){
-              console.error('MCP_EXPORT_PROXY_ERROR',error?.stack||error);
-              if(currentRpcId!==null)sendJson(res,200,{jsonrpc:'2.0',id:currentRpcId,error:{code:-32000,message:error?.message||String(error)}},{'mcp-protocol-version':req.headers['mcp-protocol-version']||MCP_LEGACY});
-              else sendJson(res,502,{error:error?.message||String(error)});
-            }
-          });
-
-          server.listen(8788,'127.0.0.1',()=>console.log('Pascal MCP export proxy listening on 127.0.0.1:8788'));
-          PROXY
-          APP_DIR="$APP_DIR" \
-          MCP_UPSTREAM="http://127.0.0.1:8787" \
-          MCP_PATH="$MCP_PATH" \
-          PASCAL_VIEWER_BASE="http://127.0.0.1:8090" \
-          PASCAL_VIEWER_PUBLIC_URL="$VIEWER_URL" \
-          nohup node "$RUNNER_TEMP/pascal-mcp-export-proxy.mjs" \
-            > "$RUNNER_TEMP/pascal-mcp-export-proxy.log" 2>&1 < /dev/null &
-          echo $! > "$RUNNER_TEMP/pascal-mcp-export-proxy.pid"
-
-          PROXY_READY=0
-          for _ in $(seq 1 60); do
-            CODE="$(curl -sS -o "$RUNNER_TEMP/proxy-health.json" -w '%{http_code}' http://127.0.0.1:8788/health 2>/dev/null || true)"
-            if [[ "$CODE" == "200" ]]; then PROXY_READY=1; break; fi
-            if ! kill -0 "$(cat "$RUNNER_TEMP/pascal-mcp-export-proxy.pid")" 2>/dev/null; then
-              echo "MCP export proxy exited unexpectedly:" >&2
-              cat "$RUNNER_TEMP/pascal-mcp-export-proxy.log" >&2 || true
-              exit 1
-            fi
-            sleep 1
-          done
-          if [[ "$PROXY_READY" != "1" ]]; then
-            echo "MCP export proxy did not become ready:" >&2
-            cat "$RUNNER_TEMP/pascal-mcp-export-proxy.log" >&2 || true
-            exit 1
-          fi
-
-          # Verify the public-facing MCP facade exposes both snapshot commands and all native Pascal tools.
-          export MCP_PATH
-          node --input-type=module <<'NODE'
-          const endpoint = `http://127.0.0.1:8788${process.env.MCP_PATH || '/mcp'}`;
-          const protocol = '2025-06-18';
-          let session;
-          async function post(body) {
-            const headers = {'content-type':'application/json','accept':'application/json, text/event-stream'};
-            if (session) headers['mcp-session-id'] = session;
-            if (body.method !== 'initialize') headers['mcp-protocol-version'] = protocol;
-            const response = await fetch(endpoint,{method:'POST',headers,body:JSON.stringify(body),signal:AbortSignal.timeout(30000)});
-            const raw = await response.text();
-            const data = raw.split(/\r?\n/).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).trimStart()).join('\n');
-            const payload = data ? JSON.parse(data) : (raw.trim() ? JSON.parse(raw) : null);
-            if (!response.ok || payload?.error) throw new Error(`Proxy MCP request failed (${response.status}): ${JSON.stringify(payload).slice(0,800)}`);
-            return {response,payload};
-          }
-          const init = await post({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:protocol,capabilities:{},clientInfo:{name:'snapshot-monitor-healthcheck',version:'1.0.0'}}});
-          session = init.response.headers.get('mcp-session-id') || undefined;
-          await post({jsonrpc:'2.0',method:'notifications/initialized'});
-          const listed = await post({jsonrpc:'2.0',id:2,method:'tools/list',params:{}});
-          const tools = listed.payload?.result?.tools || [];
-          const names = new Set(tools.map(tool=>tool.name));
-          for (const name of ['get_scene','save_scene','export_json','export_3d_to_viewer','get_latest_3d_export']) {
-            if (!names.has(name)) throw new Error(`MCP proxy is missing tool ${name}`);
-          }
-          const modernMeta = {_meta:{'io.modelcontextprotocol/protocolVersion':'2026-07-28'}};
-          async function modernPost(method,id,params={}) {
-            const response=await fetch(endpoint,{method:'POST',headers:{'content-type':'application/json','accept':'application/json, text/event-stream','mcp-protocol-version':'2026-07-28','mcp-method':method},body:JSON.stringify({jsonrpc:'2.0',id,method,params:{...params,...modernMeta}})});
-            const raw=await response.text();const result=raw.trim()?JSON.parse(raw):null;
-            if(!response.ok||result?.error)throw new Error(`Modern MCP ${method} failed: ${JSON.stringify(result)}`);
-            return result;
-          }
-          await modernPost('server/discover',3,{});
-          const modernList=await modernPost('tools/list',4,{});
-          if(!modernList?.result?.tools?.some(tool=>tool.name==='export_3d_to_viewer')) throw new Error('Modern MCP tool catalogue omitted export_3d_to_viewer.');
-          console.log(`PASCAL_MCP_EXPORT_PROXY=PASS native_plus_snapshot_tools=${tools.length}`);
-          console.log(`PASCAL_MCP_CUSTOM_TOOLS=PASS ${['export_3d_to_viewer','get_latest_3d_export'].join(',')}`);
-          console.log('PASCAL_MCP_MODERN_PROTOCOL=PASS 2026-07-28');
-          NODE
-          MCP_TOOLS_COUNT=$((MCP_TOOLS_COUNT + 2))
-
-          # Cloudflare publishes the MCP facade (port 8788), not the raw Pascal server.
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8788 \
-            > "$RUNNER_TEMP/cloudflared-mcp.log" 2>&1 < /dev/null &
-          echo $! > "$RUNNER_TEMP/cloudflared-mcp.pid"
-          MCP_TUNNEL_BASE="$(get_tunnel_url "$RUNNER_TEMP/cloudflared-mcp.log")"
-          MCP_URL="${MCP_TUNNEL_BASE}${MCP_PATH}"
-          echo "MCP_URL=$MCP_URL" >> "$GITHUB_ENV"
-          echo "MCP_TOOLS_COUNT=$MCP_TOOLS_COUNT" >> "$GITHUB_ENV"
-          echo "VIEWER_URL=$VIEWER_URL" >> "$GITHUB_OUTPUT"
-          echo "MCP_URL=$MCP_URL" >> "$GITHUB_OUTPUT"
-          echo "MCP_TOOLS_COUNT=$MCP_TOOLS_COUNT" >> "$GITHUB_OUTPUT"
-
-          {
-            echo "## Pascal 3D Snapshot Export Monitor"
-            echo ""
-            echo "- **3D monitor:** $VIEWER_URL"
-            echo "- **MCP endpoint:** $MCP_URL"
-            echo "- **MCP tools discovered:** $MCP_TOOLS_COUNT (including two snapshot tools)"
-            echo "- **Display mode:** frozen GLB file; no continuous scene sync, no screenshot loop, and no background 3D rendering of the changing SceneGraph"
-            echo "- **Export command:** `export_3d_to_viewer`"
-            echo "- **Export status command:** `get_latest_3d_export`"
-            echo "- **Storage:** `$RUNNER_TEMP/pascal-data/exports/` with `latest.glb`, timestamped version files, and `latest.json`"
-            echo ""
-            echo "> When the user explicitly requests a 3D export, the MCP command refreshes the current Pascal SceneGraph once, writes a standalone GLB file, and sends one export-complete event to the monitor. The monitor loads that saved GLB and remains unchanged until the next export. It does not stream model updates or screenshots. The current converter supports architectural walls with rectangular door/window openings, slabs, ceilings, roof polygons, columns, and dimensioned box items; unsupported node types are listed in the export report. The GLB and full project backup are downloadable from the monitor."
-            echo ""
-            echo "> Temporary test mode: no authentication is configured. Anyone who obtains the MCP Quick Tunnel URL may call write-capable tools. Stop this workflow when testing is finished."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          echo "=================================================="
-          echo "PASCAL 3D MONITOR : $VIEWER_URL"
-          echo "PASCAL MCP      : $MCP_URL"
-          echo "MCP TOOLS     : $MCP_TOOLS_COUNT"
-          echo "=================================================="
-          echo "Only the 3D snapshot monitor and the custom MCP facade are public. The raw Pascal MCP listener and Pascal Editor are not exposed."
-
-      - name: Keep Pascal viewer and MCP alive
+      - name: Publish connection details
         shell: bash
         run: |
           set -Eeuo pipefail
-          while true; do sleep 60; done
+          {
+            echo '## Pascal endpoints'
+            echo
+            echo "**3D Editor:** $PASCAL_PUBLIC_URL"
+            echo
+            echo "**MCP endpoint:** $PASCAL_MCP_PUBLIC_URL"
+            echo
+            echo "**Scene API:** $PASCAL_PUBLIC_URL/api/scenes"
+            echo
+            printf '**Pascal image:** `%s`\n\n' "$PASCAL_IMAGE"
+            echo
+            echo 'Use the editor Plugins panel to enable the first-party plugins for each project. Use the browser editor export controls for renderer-backed GLB, USDZ, STL, OBJ, IFC4 and PDF exports. The headless MCP export_glb operation is not the browser exporter.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep Pascal, MCP and both tunnels alive
+        if: ${{ inputs.keep_running }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          EDITOR_TUNNEL_PID="$(cat "$RUNNER_TEMP/pascal-editor-tunnel.pid")"
+          MCP_TUNNEL_PID="$(cat "$RUNNER_TEMP/pascal-mcp-tunnel.pid")"
+          MCP_PID="$(cat "$RUNNER_TEMP/pascal-mcp.pid")"
+
+          echo 'Pascal is ready. The workflow remains active until cancelled or the 6-hour Actions limit is reached.'
+          while true; do
+            [[ "$(docker inspect -f '{{.State.Running}}' pascal-editor 2>/dev/null || echo false)" == 'true' ]] || { docker logs --tail 200 pascal-editor || true; echo 'Pascal Editor stopped.' >&2; exit 1; }
+            kill -0 "$MCP_PID" 2>/dev/null || { cat "$RUNNER_TEMP/pascal-mcp.log" || true; echo 'Pascal MCP stopped.' >&2; exit 1; }
+            kill -0 "$EDITOR_TUNNEL_PID" 2>/dev/null || { cat "$RUNNER_TEMP/pascal-editor-tunnel.log" || true; echo 'Editor tunnel stopped.' >&2; exit 1; }
+            kill -0 "$MCP_TUNNEL_PID" 2>/dev/null || { cat "$RUNNER_TEMP/pascal-mcp-tunnel.log" || true; echo 'MCP tunnel stopped.' >&2; exit 1; }
+            sleep 20
+          done
+
+      - name: Stop Pascal services cleanly
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set +e
+          if [[ -f "$RUNNER_TEMP/pascal-mcp.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/pascal-mcp.pid")" >/dev/null 2>&1 || true
+          fi
+          docker stop --time 30 pascal-editor >/dev/null 2>&1 || true
+          docker rm pascal-editor >/dev/null 2>&1 || true
+          for file in "$RUNNER_TEMP/pascal-editor-tunnel.pid" "$RUNNER_TEMP/pascal-mcp-tunnel.pid"; do
+            [[ -f "$file" ]] && kill "$(cat "$file")" >/dev/null 2>&1 || true
+          done
+
+      - name: Save Pascal project database
+        if: ${{ always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: pascal-data
+          key: pascal-data-${{ github.ref_name }}-${{ github.run_id }}
