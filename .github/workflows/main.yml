@@ -20,7 +20,7 @@ jobs:
       PASCAL_VERSION: latest
       PASCAL_EDITOR_IMAGE: ghcr.io/pascalorg/pascal-editor:latest
       PASCAL_DATA_DIR: ${{ github.workspace }}/.pascal-data
-      PASCAL_MCP_DIR: ${{ runner.temp }}/pascal5-mcp
+      PASCAL_MCP_DIR: /tmp/pascal5-mcp
 
     steps:
       - name: Set up supported Node.js
