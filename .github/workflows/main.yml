@@ -1,4 +1,4 @@
-name: Pascal5 Editor and MCP
+name: Pascal5 Editor and MCP (Stable Packages)
 
 on:
   workflow_dispatch:
@@ -16,172 +16,220 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
-    steps:
-      - name: Check out the official Pascal Editor
-        uses: actions/checkout@v4
-        with:
-          repository: pascalorg/editor
-          ref: main
-          path: pascal-editor
-          persist-credentials: false
+    env:
+      PASCAL_VERSION: latest
+      PASCAL_EDITOR_IMAGE: ghcr.io/pascalorg/pascal-editor:latest
+      PASCAL_DATA_DIR: ${{ github.workspace }}/.pascal-data
+      PASCAL_MCP_DIR: ${{ runner.temp }}/pascal5-mcp
 
-      - name: Set up Node.js
+    steps:
+      - name: Set up supported Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: 24.22.1
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Restore Pascal project database
+      - name: Restore Pascal scene database and geometry artifacts
         uses: actions/cache@v4
         with:
           path: .pascal-data
-          key: pascal-data-${{ github.run_id }}-${{ github.run_attempt }}
+          key: pascal-data-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            pascal-data-
+            pascal-data-${{ runner.os }}-
+
+      - name: Prepare persistent data and editor password
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PASCAL_DATA_DIR" "$PASCAL_MCP_DIR"
+          EDITOR_PASSWORD="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(28))
+          PY
+          )"
+          printf 'PASCAL_ADMIN_PASSWORD=%s\n' "$EDITOR_PASSWORD" >> "$GITHUB_ENV"
+          {
+            echo '## Pascal5 startup'
+            echo
+            echo 'Editor and MCP use the same persistent Pascal data directory.'
+            echo 'MCP listens on loopback; Cloudflare publishes the /mcp endpoint without a bearer token.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install the official Pascal MCP packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PASCAL_MCP_DIR"
+          npm init -y >/dev/null
+          # Install the published MCP package together with its required Core peer.
+          # This avoids compiling the MCP source tree in Actions, which caused the
+          # missing @pascal-app/core and cascading TypeScript errors in the old workflow.
+          npm install --no-audit --no-fund --save-exact \
+            "@pascal-app/core@$PASCAL_VERSION" \
+            "@pascal-app/mcp@$PASCAL_VERSION"
+          npm ls @pascal-app/core @pascal-app/mcp
+          test -x node_modules/.bin/pascal-mcp
 
       - name: Install Cloudflare Tunnel
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-            -o /tmp/cloudflared
-          sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
+          curl -fL --retry 4 --retry-delay 2 \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o "$RUNNER_TEMP/cloudflared"
+          sudo install -m 0755 "$RUNNER_TEMP/cloudflared" /usr/local/bin/cloudflared
           cloudflared --version
 
-      - name: Install Pascal dependencies and build MCP
-        working-directory: pascal-editor
+      - name: Start Pascal Editor tunnel and obtain its public URL
         shell: bash
         run: |
           set -euo pipefail
-          bun install --frozen-lockfile
-          bun run --cwd packages/mcp build
+          nohup cloudflared tunnel --no-autoupdate \
+            --url http://127.0.0.1:3000 \
+            --loglevel info \
+            > /tmp/pascal-editor-tunnel.log 2>&1 &
+          echo $! > /tmp/pascal-editor-tunnel.pid
 
-      - name: Configure Pascal runtime
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/.pascal-data"
-          EDITOR_PASSWORD="$(python3 - <<'PY'
-          import secrets
-          print(secrets.token_urlsafe(24))
-          PY
-          )"
-          printf 'PASCAL_DATA_DIR=%s\n' "$GITHUB_WORKSPACE/.pascal-data" >> "$GITHUB_ENV"
-          printf 'PASCAL_ADMIN_PASSWORD=%s\n' "$EDITOR_PASSWORD" >> "$GITHUB_ENV"
-          printf 'PASCAL_INSTANCE_ID=%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
-          printf 'PASCAL_RUNTIME_VERSION=%s\n' "$GITHUB_SHA" >> "$GITHUB_ENV"
-          {
-            echo '## Pascal5 runtime'
-            echo
-            echo 'The editor password is generated for this run and is shown again in the connection summary.'
-            echo
-            echo 'MCP transport: Streamable HTTP on loopback, without a bearer token.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Start public Cloudflare tunnels
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Start the tunnels first so Pascal receives its real public origin at boot.
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:3002 \
-            --logfile /tmp/cloudflared-editor.log --loglevel info \
-            >/tmp/cloudflared-editor-stdout.log 2>&1 &
-          echo $! > /tmp/cloudflared-editor.pid
-
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787 \
-            --logfile /tmp/cloudflared-mcp.log --loglevel info \
-            >/tmp/cloudflared-mcp-stdout.log 2>&1 &
-          echo $! > /tmp/cloudflared-mcp.pid
-
-          editor_url=''
-          mcp_url=''
-          for i in $(seq 1 60); do
-            editor_url="$(grep -hEo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-editor.log /tmp/cloudflared-editor-stdout.log 2>/dev/null | head -n 1)" || true
-            mcp_url="$(grep -hEo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cloudflared-mcp.log /tmp/cloudflared-mcp-stdout.log 2>/dev/null | head -n 1)" || true
-            if [ -n "$editor_url" ] && [ -n "$mcp_url" ]; then
+          EDITOR_URL=''
+          for attempt in $(seq 1 60); do
+            EDITOR_URL="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
+              /tmp/pascal-editor-tunnel.log 2>/dev/null | head -n 1 || true)"
+            if [ -n "$EDITOR_URL" ]; then
               break
+            fi
+            if ! kill -0 "$(cat /tmp/pascal-editor-tunnel.pid)" 2>/dev/null; then
+              echo 'Cloudflare Editor tunnel exited unexpectedly.'
+              cat /tmp/pascal-editor-tunnel.log || true
+              exit 1
             fi
             sleep 2
           done
 
-          if [ -z "$editor_url" ] || [ -z "$mcp_url" ]; then
-            echo 'Could not obtain both Cloudflare Quick Tunnel URLs.'
-            tail -n 100 /tmp/cloudflared-editor.log /tmp/cloudflared-mcp.log 2>/dev/null || true
-            tail -n 100 /tmp/cloudflared-editor-stdout.log /tmp/cloudflared-mcp-stdout.log 2>/dev/null || true
+          if [ -z "$EDITOR_URL" ]; then
+            echo 'Could not obtain the Pascal Editor Quick Tunnel URL.'
+            tail -n 100 /tmp/pascal-editor-tunnel.log || true
             exit 1
           fi
+          printf 'PASCAL_EDITOR_URL=%s\n' "$EDITOR_URL" >> "$GITHUB_ENV"
+          echo "Editor tunnel ready: $EDITOR_URL"
 
-          printf 'PASCAL_PUBLIC_URL=%s\n' "$editor_url" >> "$GITHUB_ENV"
-          printf 'PASCAL_EDITOR_URL=%s\n' "$editor_url" >> "$GITHUB_ENV"
-          printf 'PASCAL_MCP_URL=%s/mcp\n' "$mcp_url" >> "$GITHUB_ENV"
-
-      - name: Start Pascal Editor and MCP
-        working-directory: pascal-editor
+      - name: Pull and start the official Pascal Editor container
         shell: bash
         run: |
           set -euo pipefail
-          nohup env \
-            PASCAL_DATA_DIR="$PASCAL_DATA_DIR" \
-            PASCAL_ADMIN_PASSWORD="$PASCAL_ADMIN_PASSWORD" \
-            PASCAL_PUBLIC_URL="$PASCAL_PUBLIC_URL" \
-            bun dev > /tmp/pascal-editor.log 2>&1 &
-          echo $! > /tmp/pascal-editor.pid
+          docker pull "$PASCAL_EDITOR_IMAGE"
+          docker run --detach \
+            --name pascal5-editor \
+            --restart unless-stopped \
+            --publish 127.0.0.1:3000:3000 \
+            --mount "type=bind,source=$PASCAL_DATA_DIR,target=/data" \
+            --env PASCAL_DATA_DIR=/data \
+            --env PASCAL_ADMIN_PASSWORD="$PASCAL_ADMIN_PASSWORD" \
+            --env PASCAL_PUBLIC_URL="$PASCAL_EDITOR_URL" \
+            "$PASCAL_EDITOR_IMAGE"
 
-          # Official HTTP MCP transport: loopback-only, no bearer token.
-          # Cloudflare reaches it locally; the public URL is /mcp.
-          nohup env \
-            PASCAL_DATA_DIR="$PASCAL_DATA_DIR" \
-            PASCAL_INSTANCE_ID="$PASCAL_INSTANCE_ID" \
-            PASCAL_RUNTIME_VERSION="$PASCAL_RUNTIME_VERSION" \
-            bun packages/mcp/dist/bin/pascal-mcp.js --http --host 127.0.0.1 --port 8787 \
+      - name: Start Pascal MCP on loopback
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup env PASCAL_DATA_DIR="$PASCAL_DATA_DIR" \
+            "$PASCAL_MCP_DIR/node_modules/.bin/pascal-mcp" \
+            --http --host 127.0.0.1 --port 8787 \
             > /tmp/pascal-mcp.log 2>&1 &
           echo $! > /tmp/pascal-mcp.pid
 
-      - name: Wait for Pascal services
+      - name: Start Pascal MCP tunnel and obtain its public URL
         shell: bash
         run: |
           set -euo pipefail
+          nohup cloudflared tunnel --no-autoupdate \
+            --url http://127.0.0.1:8787 \
+            --loglevel info \
+            > /tmp/pascal-mcp-tunnel.log 2>&1 &
+          echo $! > /tmp/pascal-mcp-tunnel.pid
+
+          MCP_ORIGIN=''
+          for attempt in $(seq 1 60); do
+            MCP_ORIGIN="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' \
+              /tmp/pascal-mcp-tunnel.log 2>/dev/null | head -n 1 || true)"
+            if [ -n "$MCP_ORIGIN" ]; then
+              break
+            fi
+            if ! kill -0 "$(cat /tmp/pascal-mcp-tunnel.pid)" 2>/dev/null; then
+              echo 'Cloudflare MCP tunnel exited unexpectedly.'
+              cat /tmp/pascal-mcp-tunnel.log || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ -z "$MCP_ORIGIN" ]; then
+            echo 'Could not obtain the Pascal MCP Quick Tunnel URL.'
+            tail -n 100 /tmp/pascal-mcp-tunnel.log || true
+            exit 1
+          fi
+          printf 'PASCAL_MCP_URL=%s/mcp\n' "$MCP_ORIGIN" >> "$GITHUB_ENV"
+          echo "MCP tunnel ready: ${MCP_ORIGIN}/mcp"
+
+      - name: Verify Editor and MCP locally and through Cloudflare
+        shell: bash
+        run: |
+          set -euo pipefail
+
           editor_ready=0
-          for i in $(seq 1 90); do
-            if curl -fsS http://127.0.0.1:3002/api/health >/tmp/pascal-editor-health.json; then
+          for attempt in $(seq 1 90); do
+            if curl -fsS --max-time 10 http://127.0.0.1:3000/api/health \
+              -o /tmp/pascal-editor-health.json; then
               editor_ready=1
               break
             fi
-            if ! kill -0 "$(cat /tmp/pascal-editor.pid)" 2>/dev/null; then
-              echo 'Pascal Editor exited before becoming ready.'
-              tail -n 120 /tmp/pascal-editor.log || true
+            if ! docker ps --format '{{.Names}}' | grep -qx 'pascal5-editor'; then
+              echo 'Pascal Editor container stopped before becoming ready.'
+              docker logs --tail 120 pascal5-editor || true
               exit 1
             fi
             sleep 2
           done
           if [ "$editor_ready" -ne 1 ]; then
-            echo 'Pascal Editor did not become ready.'
-            tail -n 120 /tmp/pascal-editor.log || true
+            echo 'Pascal Editor did not become healthy.'
+            docker logs --tail 120 pascal5-editor || true
             exit 1
           fi
 
-          mcp_ready=0
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8787/health >/tmp/pascal-mcp-health.json; then
-              mcp_ready=1
-              break
+          MCP_PAYLOAD='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"pascal5-actions-smoke-test","version":"1.0.0"}}}'
+
+          check_mcp() {
+            local target="$1"
+            local http_code
+            echo "Checking MCP: $target"
+            if ! http_code="$(curl --silent --show-error \
+              --output /tmp/pascal-mcp-initialize.out \
+              --write-out '%{http_code}' \
+              --max-time 30 \
+              -X POST "$target" \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              --data "$MCP_PAYLOAD")"; then
+              echo "MCP request could not complete: $target"
+              cat /tmp/pascal-mcp-initialize.out 2>/dev/null || true
+              tail -n 100 /tmp/pascal-mcp.log || true
+              return 1
             fi
-            if ! kill -0 "$(cat /tmp/pascal-mcp.pid)" 2>/dev/null; then
-              echo 'Pascal MCP exited before becoming ready.'
-              tail -n 120 /tmp/pascal-mcp.log || true
-              exit 1
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+              echo "MCP initialize returned HTTP $http_code from $target"
+              cat /tmp/pascal-mcp-initialize.out || true
+              tail -n 100 /tmp/pascal-mcp.log || true
+              return 1
             fi
-            sleep 2
-          done
-          if [ "$mcp_ready" -ne 1 ]; then
-            echo 'Pascal MCP did not become ready.'
-            tail -n 120 /tmp/pascal-mcp.log || true
-            exit 1
-          fi
+            if ! grep -q 'serverInfo' /tmp/pascal-mcp-initialize.out; then
+              echo 'MCP response did not contain serverInfo.'
+              cat /tmp/pascal-mcp-initialize.out || true
+              return 1
+            fi
+            echo 'MCP initialize succeeded.'
+          }
+
+          check_mcp http://127.0.0.1:8787/mcp
+          check_mcp "$PASCAL_MCP_URL"
 
           {
             echo '## Pascal5 connection details'
@@ -191,60 +239,65 @@ jobs:
             echo "- **MCP URL:** ${PASCAL_MCP_URL}"
             echo '- **ChatGPT Authentication:** No authentication'
             echo
-            echo 'The editor password protects the browser editor. The MCP endpoint itself has no bearer token.'
+            echo 'Editor and MCP share the same Pascal database and geometry-artifact directory.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify MCP initialize locally and through Cloudflare
-        shell: bash
-        run: |
-          set -euo pipefail
-          payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"pascal5-smoke-test","version":"1.0.0"}}}'
-
-          for target in "http://127.0.0.1:8787/mcp" "$PASCAL_MCP_URL"; do
-            echo "Checking $target"
-            code="$(curl --silent --show-error --output /tmp/pascal-mcp-init.out --write-out '%{http_code}' \
-              --max-time 30 \
-              -X POST "$target" \
-              -H 'Content-Type: application/json' \
-              -H 'Accept: application/json, text/event-stream' \
-              --data "$payload")"
-            if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
-              echo "MCP initialize failed with HTTP $code"
-              cat /tmp/pascal-mcp-init.out || true
-              tail -n 100 /tmp/pascal-mcp.log || true
-              exit 1
-            fi
-            if ! grep -q 'serverInfo' /tmp/pascal-mcp-init.out; then
-              echo 'MCP returned HTTP success but no serverInfo in initialize response.'
-              cat /tmp/pascal-mcp-init.out || true
-              exit 1
-            fi
-            echo 'MCP initialize: OK'
-          done
-
-      - name: Keep Pascal running and show diagnostics
+      - name: Show diagnostics and keep Pascal running
         if: always()
         shell: bash
         run: |
           {
             echo
-            echo '## Runtime diagnostics'
+            echo '## Pascal5 diagnostics'
             echo
-            echo '### Pascal Editor log (last 60 lines)'
+            echo '### Editor container'
             echo '```text'
-            tail -n 60 /tmp/pascal-editor.log 2>/dev/null || true
+            docker logs --tail 80 pascal5-editor 2>&1 || true
             echo '```'
             echo
-            echo '### Pascal MCP log (last 60 lines)'
+            echo '### MCP server'
             echo '```text'
-            tail -n 60 /tmp/pascal-mcp.log 2>/dev/null || true
+            tail -n 80 /tmp/pascal-mcp.log 2>/dev/null || true
             echo '```'
             echo
-            echo '### Cloudflare MCP tunnel log (last 30 lines)'
+            echo '### Cloudflare MCP tunnel'
             echo '```text'
-            tail -n 30 /tmp/cloudflared-mcp.log 2>/dev/null || true
+            tail -n 50 /tmp/pascal-mcp-tunnel.log 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
           if [ "${{ job.status }}" = "success" ]; then
-            sleep 20000
+            # Leave the editor and MCP available while the Actions job is active.
+            sleep 21000
           fi
+
+      - name: Stop services and checkpoint Pascal database
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -f /tmp/pascal-mcp.pid ]; then
+            kill -TERM "$(cat /tmp/pascal-mcp.pid)" 2>/dev/null
+          fi
+          if [ -f /tmp/pascal-mcp-tunnel.pid ]; then
+            kill -TERM "$(cat /tmp/pascal-mcp-tunnel.pid)" 2>/dev/null
+          fi
+          if [ -f /tmp/pascal-editor-tunnel.pid ]; then
+            kill -TERM "$(cat /tmp/pascal-editor-tunnel.pid)" 2>/dev/null
+          fi
+          docker stop --time 20 pascal5-editor >/dev/null 2>&1
+
+          python3 - <<'PY'
+          import os
+          import sqlite3
+          db = os.path.join(os.environ.get("PASCAL_DATA_DIR", ".pascal-data"), "pascal.db")
+          if os.path.isfile(db):
+              try:
+                  with sqlite3.connect(db, timeout=30) as connection:
+                      connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                  print("Pascal SQLite WAL checkpoint completed.")
+              except Exception as exc:
+                  print(f"SQLite checkpoint warning: {exc}")
+          else:
+              print("No Pascal database file found yet; nothing to checkpoint.")
+          PY
