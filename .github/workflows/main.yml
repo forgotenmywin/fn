@@ -64,12 +64,42 @@ jobs:
           echo "Scene filename: $SCENE_FILE_NAME"
           echo "Shared scene database: $DATA_DIR"
 
+          # Install MCP and its required Core peer dependency side by side at the
+          # same exact release. npm exec alone may resolve a different peer copy.
+          MCP_DIR="$RUNNER_TEMP/pascal-mcp-runtime"
+          mkdir -p "$MCP_DIR"
+          npm install \
+            --prefix "$MCP_DIR" \
+            --no-audit \
+            --no-fund \
+            --save-exact \
+            "@pascal-app/core@${VERSION}" \
+            "@pascal-app/mcp@${VERSION}"
+
+          echo "Installed Pascal MCP/Core dependency tree:"
+          npm ls --prefix "$MCP_DIR" --depth=0
+          npm ls --prefix "$MCP_DIR" "@pascal-app/mcp" "@pascal-app/core"
+
+          # Fail immediately with a clear diagnostic if the exact Core package
+          # still lacks the named export that MCP imports at startup.
+          (
+            cd "$MCP_DIR"
+            node --input-type=module <<'NODE'
+          import { assetViewsReadCatalog } from '@pascal-app/core/agent-operations';
+          if (typeof assetViewsReadCatalog === 'undefined') {
+            throw new Error('Core 1.0.6 is missing assetViewsReadCatalog');
+          }
+          console.log('PASCAL_CORE_AGENT_OPERATIONS_EXPORT=PASS');
+          NODE
+          )
+
           # MCP is headless. The official Viewer package below is the only UI exposed to the user.
           (
             export PASCAL_DATA_DIR="$DATA_DIR"
             export PASCAL_DB_PATH="$DATA_DIR/pascal.db"
-            exec npm exec --yes --package="@pascal-app/mcp@${VERSION}" -- \
-              pascal-mcp --http --host 127.0.0.1 --port 8787 \
+            cd "$MCP_DIR"
+            exec "$MCP_DIR/node_modules/.bin/pascal-mcp" \
+              --http --host 127.0.0.1 --port 8787 \
               --cors-origin https://chatgpt.com \
               --cors-origin https://chat.openai.com
           ) > "$RUNNER_TEMP/pascal-mcp.log" 2>&1 < /dev/null &
